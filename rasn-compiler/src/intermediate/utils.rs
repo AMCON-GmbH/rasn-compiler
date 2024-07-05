@@ -14,4 +14,12 @@ macro_rules! get_declaration {
     }};
 }
 
+use std::error::Error;
+
 pub(crate) use get_declaration;
+use crate::intermediate::{ModuleReference, ToplevelDefinition};
+use crate::lexer;
+
+pub fn asn_spec(input: &str) -> Result<Vec<(ModuleReference, Vec<ToplevelDefinition>)>, Box<dyn Error>> {
+    lexer::asn_spec(input).map_err(|lexer_error| format!("can not parse asn1 definition: {lexer_error:?}").into())
+}
