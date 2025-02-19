@@ -1,50 +1,62 @@
 use nom::{
+    branch::alt,
     bytes::complete::tag,
     character::complete::{char, one_of},
     combinator::{map, opt},
-    multi::fold_many0,
+    multi::{fold_many0, separated_list0},
     sequence::{delimited, pair, preceded},
-    IResult,
 };
 
-use crate::intermediate::*;
+use crate::{input::Input, intermediate::*};
 
-use super::{common::*, constraint::constraint, util::hex_to_bools};
+use super::{common::*, constraint::constraint, error::ParserResult, util::hex_to_bools};
 
 /// Parses a BIT STRING value. Currently, the lexer only supports parsing binary and
 /// hexadecimal values, but not the named bit notation in curly braces.
-pub fn bit_string_value(input: &str) -> IResult<&str, ASN1Value> {
-    map(
-        skip_ws_and_comments(pair(
-            delimited(
-                char(SINGLE_QUOTE),
-                fold_many0(one_of("0123456789ABCDEF"), String::new, |mut acc, curr| {
-                    acc.push(curr);
-                    acc
-                }),
-                char(SINGLE_QUOTE),
-            ),
-            one_of("HB"),
-        )),
-        |(value, encoding)| {
-            if encoding == 'B' {
-                ASN1Value::BitString(value.chars().map(|c| c == '1').collect())
-            } else {
-                ASN1Value::BitString(value.chars().flat_map(hex_to_bools).collect())
-            }
-        },
-    )(input)
+pub fn bit_string_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
+    alt((
+        map(
+            skip_ws_and_comments(pair(
+                delimited(
+                    char(SINGLE_QUOTE),
+                    fold_many0(one_of("0123456789ABCDEF"), String::new, |mut acc, curr| {
+                        acc.push(curr);
+                        acc
+                    }),
+                    char(SINGLE_QUOTE),
+                ),
+                one_of("HB"),
+            )),
+            |(value, encoding)| {
+                if encoding == 'B' {
+                    ASN1Value::BitString(value.chars().map(|c| c == '1').collect())
+                } else {
+                    ASN1Value::BitString(value.chars().flat_map(hex_to_bools).collect())
+                }
+            },
+        ),
+        map(
+            skip_ws_and_comments(delimited(
+                char(LEFT_BRACE),
+                separated_list0(char(','), skip_ws_and_comments(value_identifier)),
+                char(RIGHT_BRACE),
+            )),
+            |named_bits| {
+                ASN1Value::BitStringNamedBits(named_bits.into_iter().map(String::from).collect())
+            },
+        ),
+    ))(input)
 }
 
 /// Tries to parse an ASN1 BIT STRING
 ///
-/// *`input` - string slice to be matched against
+/// *`input` - [Input]-wrapped string slice to be matched against
 ///
 /// `bit_string` will try to match an BIT STRING declaration in the `input` string.
 /// If the match succeeds, the lexer will consume the match and return the remaining string
 /// and a wrapped `BitString` value representing the ASN1 declaration.
 /// If the match fails, the lexer will not consume the input and will return an error.
-pub fn bit_string(input: &str) -> IResult<&str, ASN1Type> {
+pub fn bit_string(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
     map(
         preceded(
             skip_ws_and_comments(tag(BIT_STRING)),
@@ -56,13 +68,14 @@ pub fn bit_string(input: &str) -> IResult<&str, ASN1Type> {
 
 #[cfg(test)]
 mod tests {
-    use crate::intermediate::{constraints::*, types::*, *};
-
-    use super::bit_string;
+    use crate::{
+        intermediate::{constraints::*, types::*, *},
+        lexer::{bit_string, bit_string_value},
+    };
 
     #[test]
     fn parses_unconfined_bitstring() {
-        let sample = "  BIT STRING";
+        let sample = "  BIT STRING".into();
         assert_eq!(
             bit_string(sample).unwrap().1,
             ASN1Type::BitString(BitString {
@@ -74,7 +87,7 @@ mod tests {
 
     #[test]
     fn parses_strictly_constrained_bitstring() {
-        let sample = "  BIT STRING(SIZE (8))";
+        let sample = "  BIT STRING(SIZE (8))".into();
         assert_eq!(
             bit_string(sample).unwrap().1,
             ASN1Type::BitString(BitString {
@@ -94,7 +107,7 @@ mod tests {
 
     #[test]
     fn parses_range_constrained_bitstring() {
-        let sample = "  BIT STRING -- even here?!?!? -- (SIZE (8 ..18))";
+        let sample = "  BIT STRING -- even here?!?!? -- (SIZE (8 ..18))".into();
         assert_eq!(
             bit_string(sample).unwrap().1,
             ASN1Type::BitString(BitString {
@@ -115,7 +128,7 @@ mod tests {
 
     #[test]
     fn parses_strictly_constrained_extended_bitstring() {
-        let sample = "  BIT STRING (SIZE (2, ...))";
+        let sample = "  BIT STRING (SIZE (2, ...))".into();
         assert_eq!(
             bit_string(sample).unwrap().1,
             ASN1Type::BitString(BitString {
@@ -135,7 +148,7 @@ mod tests {
 
     #[test]
     fn parses_range_constrained_extended_bitstring() {
-        let sample = "  BIT STRING (SIZE (8 -- comment -- .. 18, ...))";
+        let sample = "  BIT STRING (SIZE (8 -- comment -- .. 18, ...))".into();
         assert_eq!(
             bit_string(sample).unwrap().1,
             ASN1Type::BitString(BitString {
@@ -161,7 +174,8 @@ mod tests {
           excessWidth  (1),  -- this is excessive
           excessLength (2),  -- this, too
           excessHeight (3) -- and this
-      } (SIZE(4))"#;
+      } (SIZE(4))"#
+            .into();
         assert_eq!(
             bit_string(sample).unwrap().1,
             ASN1Type::BitString(BitString {
@@ -193,6 +207,14 @@ mod tests {
                     extensible: false
                 })]
             })
+        )
+    }
+
+    #[test]
+    fn parses_named_bits() {
+        assert_eq!(
+            ASN1Value::BitStringNamedBits(vec![String::from("blue"), String::from("yellow")]),
+            bit_string_value(r#"{blue, yellow}"#.into()).unwrap().1
         )
     }
 }

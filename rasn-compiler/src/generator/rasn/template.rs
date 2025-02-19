@@ -9,7 +9,7 @@ pub fn typealias_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         pub struct #name (pub #alias);
     }
@@ -49,7 +49,7 @@ pub fn integer_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, PartialOrd, Eq, Ord, Hash)]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         pub struct #name (pub #integer_type);
 
@@ -63,7 +63,7 @@ pub fn generalized_time_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         pub struct #name(pub GeneralizedTime);
     }
@@ -76,7 +76,7 @@ pub fn utc_time_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         pub struct #name(pub UtcTime);
     }
@@ -89,9 +89,23 @@ pub fn bit_string_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         pub struct #name(pub BitString);
+    }
+}
+
+pub fn fixed_bit_string_template(
+    comments: TokenStream,
+    name: TokenStream,
+    annotations: TokenStream,
+    size: TokenStream,
+) -> TokenStream {
+    quote! {
+        #comments
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #annotations
+        pub struct #name(pub FixedBitString<#size>);
     }
 }
 
@@ -102,9 +116,23 @@ pub fn octet_string_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         pub struct #name(pub OctetString);
+    }
+}
+
+pub fn fixed_octet_string_template(
+    comments: TokenStream,
+    name: TokenStream,
+    annotations: TokenStream,
+    size: TokenStream,
+) -> TokenStream {
+    quote! {
+        #comments
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #annotations
+        pub struct #name(pub FixedOctetString<#size>);
     }
 }
 
@@ -116,7 +144,7 @@ pub fn char_string_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         pub struct #name(pub #string_type);
     }
@@ -129,7 +157,7 @@ pub fn boolean_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Copy, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Copy, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         pub struct #name(pub bool);
     }
@@ -166,9 +194,9 @@ pub fn null_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Copy, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Copy, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
-        pub struct #name(());
+        pub struct #name(pub ());
     }
 }
 
@@ -179,9 +207,9 @@ pub fn any_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
-        pub struct #name(Any);
+        pub struct #name(pub Any);
     }
 }
 
@@ -192,7 +220,7 @@ pub fn oid_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         pub struct #name(pub ObjectIdentifier);
     }
@@ -207,7 +235,7 @@ pub fn enumerated_template(
 ) -> TokenStream {
     quote! {
         #comments
-        #[derive(AsnType, Debug, Clone, Copy, Decode, Encode, PartialEq, PartialOrd, Eq, Ord, Hash)]
+        #[derive(AsnType, Debug, Clone, Copy, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         #extensible
         pub enum #name {
@@ -247,7 +275,7 @@ pub fn sequence_or_set_template(
     quote! {
         #(#nested_members)*
         #comments
-        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         #extensible
         pub struct #name {
@@ -276,7 +304,7 @@ pub fn sequence_or_set_of_template(
     quote! {
             #anonymous_item
             #comments
-            #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+            #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
             #annotations
             pub struct #name(pub #generic_type<#member_type>);
     }
@@ -312,7 +340,7 @@ pub fn const_choice_value_template(
 
 pub fn choice_template(
     comments: TokenStream,
-    name: TokenStream,
+    name: &TokenStream,
     extensible: TokenStream,
     options: TokenStream,
     nested_options: Vec<TokenStream>,
@@ -321,11 +349,25 @@ pub fn choice_template(
     quote! {
         #(#nested_options)*
         #comments
-        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #annotations
         #extensible
         pub enum #name {
             #options
+        }
+    }
+}
+
+pub fn choice_from_impl_template(
+    name: &TokenStream,
+    variant: Ident,
+    wrapped: TokenStream,
+) -> TokenStream {
+    quote! {
+        impl From<#wrapped> for #name {
+            fn from(value: #wrapped) -> Self {
+                Self::#variant(value)
+            }
         }
     }
 }

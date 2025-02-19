@@ -157,6 +157,7 @@ pub const RELATIVE_OID_IRI: &str = "RELATIVE-OID-IRI";
 pub const TIME: &str = "TIME";
 pub const TIME_OF_DAY: &str = "TIME-OF-DAY";
 pub const TYPE_IDENTIFIER: &str = "TYPE-IDENTIFIER";
+pub const ENCODING_CONTROL: &str = "ENCODING-CONTROL";
 
 pub const ASN1_KEYWORDS: [&str; 63] = [
     ABSTRACT_SYNTAX,
@@ -224,12 +225,9 @@ pub const ASN1_KEYWORDS: [&str; 63] = [
     TAGS,
 ];
 
-macro_rules! error {
+macro_rules! grammar_error {
     ($kind:ident, $($arg:tt)*) => {
-        GrammarError {
-            details: format!($($arg)*),
-            kind: GrammarErrorType::$kind,
-        }
+        GrammarError::new(&format!($($arg)*),GrammarErrorType::$kind)
     };
 }
 
@@ -244,9 +242,10 @@ impl From<&str> for EncodingReferenceDefault {
 
 #[cfg_attr(test, derive(EnumDebug))]
 #[cfg_attr(not(test), derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum TaggingEnvironment {
     Automatic,
+    #[default]
     Implicit,
     Explicit,
 }
@@ -266,9 +265,10 @@ impl Add<&TaggingEnvironment> for &TaggingEnvironment {
 /// Rec. ITU-T X.680 (02/2021) § 13.4
 #[cfg_attr(test, derive(EnumDebug))]
 #[cfg_attr(not(test), derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum ExtensibilityEnvironment {
     Implied,
+    #[default]
     Explicit,
 }
 
@@ -607,7 +607,10 @@ impl ToplevelDefinition {
     ///             comments: String::from("Comments from the ASN.1 spec"),
     ///             parameterization: None,
     ///             name: String::from("the-answer"),
-    ///             associated_type: String::from("INTEGER"),
+    ///             associated_type: ASN1Type::Integer(Integer {
+    ///                 constraints: vec![],
+    ///                 distinguished_values: None,
+    ///             }),
     ///             value: ASN1Value::Integer(42),
     ///             index: None,
     ///         }
@@ -630,14 +633,14 @@ impl ToplevelDefinition {
 pub struct ToplevelValueDefinition {
     pub comments: String,
     pub name: String,
-    pub associated_type: String,
+    pub associated_type: ASN1Type,
     pub parameterization: Option<Parameterization>,
     pub value: ASN1Value,
     pub index: Option<(Rc<RefCell<ModuleReference>>, usize)>,
 }
 
-impl From<(&str, ASN1Value, &str)> for ToplevelValueDefinition {
-    fn from(value: (&str, ASN1Value, &str)) -> Self {
+impl From<(&str, ASN1Value, ASN1Type)> for ToplevelValueDefinition {
+    fn from(value: (&str, ASN1Value, ASN1Type)) -> Self {
         Self {
             comments: String::new(),
             name: value.0.to_owned(),
@@ -649,15 +652,29 @@ impl From<(&str, ASN1Value, &str)> for ToplevelValueDefinition {
     }
 }
 
-impl From<(Vec<&str>, &str, Option<Parameterization>, &str, ASN1Value)>
-    for ToplevelValueDefinition
+impl
+    From<(
+        Vec<&str>,
+        &str,
+        Option<Parameterization>,
+        ASN1Type,
+        ASN1Value,
+    )> for ToplevelValueDefinition
 {
-    fn from(value: (Vec<&str>, &str, Option<Parameterization>, &str, ASN1Value)) -> Self {
+    fn from(
+        value: (
+            Vec<&str>,
+            &str,
+            Option<Parameterization>,
+            ASN1Type,
+            ASN1Value,
+        ),
+    ) -> Self {
         Self {
             comments: value.0.join("\n"),
             name: value.1.into(),
             parameterization: value.2,
-            associated_type: value.3.into(),
+            associated_type: value.3,
             value: value.4,
             index: None,
         }
@@ -1097,6 +1114,7 @@ pub enum ASN1Value {
     Real(f64),
     String(String),
     BitString(Vec<bool>),
+    BitStringNamedBits(Vec<String>),
     OctetString(Vec<u8>),
     EnumeratedValue {
         enumerated: String,
@@ -1213,7 +1231,7 @@ impl ASN1Value {
             }
             (ASN1Value::String(s), ASN1Value::String(o), Some(set)) => {
                 if s.len() != 1 || o.len() != 1 {
-                    return Err(error!(
+                    return Err(grammar_error!(
                         UnpackingError,
                         "Unsupported operation for ASN1Values {self:?} and {other:?}"
                     ));
@@ -1236,13 +1254,13 @@ impl ASN1Value {
                             Ok(other.clone())
                         }
                     }
-                    _ => Err(error!(
+                    _ => Err(grammar_error!(
                             UnpackingError,
                             "Failed to find ASN1Values {self:?} and {other:?} in character set {char_set:?}",
                         )),
                 }
             }
-            _ => Err(error!(
+            _ => Err(grammar_error!(
                 UnpackingError,
                 "Unsupported operation for ASN1Values {self:?} and {other:?}",
             )),
@@ -1253,7 +1271,10 @@ impl ASN1Value {
         if let ASN1Value::Integer(i) = self {
             Ok(*i)
         } else {
-            Err(error!(UnpackingError, "Cannot unwrap {self:?} as integer!"))
+            Err(grammar_error!(
+                UnpackingError,
+                "Cannot unwrap {self:?} as integer!"
+            ))
         }
     }
 }

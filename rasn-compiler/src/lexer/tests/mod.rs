@@ -21,7 +21,8 @@ fn parses_toplevel_simple_integer_declaration() {
           * @category: Basic information
           * @revision: Created in V2.1.1
          */
-         CardinalNumber3b ::= INTEGER(1..8)",
+         CardinalNumber3b ::= INTEGER(1..8)"
+            .into(),
     )
     .unwrap()
     .1;
@@ -63,7 +64,7 @@ fn parses_toplevel_macro_integer_declaration() {
       AccelerationMagnitudeValue ::= INTEGER {
           positiveOutOfRange (160),
           unavailable        (161)
-      } (0.. 161, ...)"#).unwrap().1;
+      } (0.. 161, ...)"#.into()).unwrap().1;
     assert_eq!(tld.name, String::from("AccelerationMagnitudeValue"));
     assert!(tld.comments.contains("@unit 0,1 m/s^2"));
     if let ASN1Type::Integer(int) = tld.ty {
@@ -99,7 +100,8 @@ fn parses_toplevel_enumerated_declaration() {
         CE-mode-B-SupportIndicator ::= ENUMERATED {
            supported,
            ...
-        }"#,
+        }"#
+        .into(),
     )
     .unwrap()
     .1;
@@ -134,7 +136,7 @@ fn parses_toplevel_boolean_declaration() {
             * @category: Vehicle information
             * @revision: editorial update in V2.1.1
             */
-           EmbarkationStatus ::= BOOLEAN"#,
+           EmbarkationStatus ::= BOOLEAN"#.into(),
         )
         .unwrap()
         .1;
@@ -157,7 +159,8 @@ fn parses_toplevel_crossrefering_declaration() {
         EventZone::= EventHistory
         ((WITH COMPONENT (WITH COMPONENTS {..., eventDeltaTime PRESENT})) |
          (WITH COMPONENT (WITH COMPONENTS {..., eventDeltaTime ABSENT})))
-         }"#,
+         }"#
+        .into(),
     )
     .unwrap()
     .1;
@@ -172,24 +175,40 @@ fn parses_toplevel_crossrefering_declaration() {
                 identifier: "EventHistory".into(),
                 constraints: vec![Constraint::SubtypeConstraint(ElementSet {
                     set: ElementOrSetOperation::SetOperation(SetOperation {
-                        base: SubtypeElement::MultipleTypeConstraints(InnerTypeConstraint {
-                            is_partial: true,
-                            constraints: vec![ConstrainedComponent {
-                                identifier: "eventDeltaTime".into(),
-                                constraints: vec![],
-                                presence: ComponentPresence::Present
-                            }]
-                        }),
+                        base: SubtypeElement::SingleTypeConstraint(vec![
+                            Constraint::SubtypeConstraint(ElementSet {
+                                extensible: false,
+                                set: ElementOrSetOperation::Element(
+                                    SubtypeElement::MultipleTypeConstraints(InnerTypeConstraint {
+                                        is_partial: true,
+                                        constraints: vec![ConstrainedComponent {
+                                            identifier: "eventDeltaTime".into(),
+                                            constraints: vec![],
+                                            presence: ComponentPresence::Present
+                                        }]
+                                    })
+                                )
+                            })
+                        ]),
                         operator: SetOperator::Union,
                         operant: Box::new(ElementOrSetOperation::Element(
-                            SubtypeElement::MultipleTypeConstraints(InnerTypeConstraint {
-                                is_partial: true,
-                                constraints: vec![ConstrainedComponent {
-                                    identifier: "eventDeltaTime".into(),
-                                    constraints: vec![],
-                                    presence: ComponentPresence::Absent
-                                }]
-                            })
+                            SubtypeElement::SingleTypeConstraint(vec![
+                                Constraint::SubtypeConstraint(ElementSet {
+                                    extensible: false,
+                                    set: ElementOrSetOperation::Element(
+                                        SubtypeElement::MultipleTypeConstraints(
+                                            InnerTypeConstraint {
+                                                is_partial: true,
+                                                constraints: vec![ConstrainedComponent {
+                                                    identifier: "eventDeltaTime".into(),
+                                                    constraints: vec![],
+                                                    presence: ComponentPresence::Absent
+                                                }]
+                                            }
+                                        )
+                                    )
+                                })
+                            ])
                         ))
                     }),
                     extensible: false
@@ -205,7 +224,8 @@ fn parses_toplevel_crossrefering_declaration() {
 fn parses_anonymous_sequence_of_declaration() {
     let tld = top_level_type_declaration(
         r#"--Comments
-        InterferenceManagementZones ::= SEQUENCE (SIZE(1..16), ...) OF InterferenceManagementZone"#,
+        InterferenceManagementZones ::= SEQUENCE (SIZE(1..16), ...) OF InterferenceManagementZone"#
+            .into(),
     )
     .unwrap()
     .1;
@@ -216,6 +236,7 @@ fn parses_anonymous_sequence_of_declaration() {
             comments: "Comments".into(),
             name: "InterferenceManagementZones".into(),
             ty: ASN1Type::SequenceOf(SequenceOrSetOf {
+                is_recursive: false,
                 constraints: vec![Constraint::SubtypeConstraint(ElementSet {
                     set: ElementOrSetOperation::Element(SubtypeElement::SizeConstraint(Box::new(
                         ElementOrSetOperation::Element(SubtypeElement::ValueRange {
@@ -248,6 +269,7 @@ fn parses_object_set_value() {
         {PerceivedObjectContainer IDENTIFIED BY perceivedObjectContainer},
         ...
     }"#
+            .into()
         )
         .unwrap()
         .1,
@@ -312,7 +334,7 @@ fn parses_object_set_value() {
 fn parses_empty_extensible_object_set() {
     assert_eq!(
         top_level_information_declaration(
-            r#"Reg-AdvisorySpeed	            REG-EXT-ID-AND-TYPE ::= { ... }"#
+            r#"Reg-AdvisorySpeed	            REG-EXT-ID-AND-TYPE ::= { ... }"#.into()
         )
         .unwrap()
         .1,
@@ -338,6 +360,7 @@ fn parses_class_declaration() {
                   &id     RegionId UNIQUE,
                   &Type
                 } WITH SYNTAX {&Type IDENTIFIED BY &id}"#
+                .into()
         )
         .unwrap()
         .1,
@@ -393,6 +416,7 @@ fn parses_parameterized_declaration() {
                   regionId     REG-EXT-ID-AND-TYPE.&id( {Set} ),
                   regExtValue  REG-EXT-ID-AND-TYPE.&Type( {Set}{@regionId} )
                 }"#
+            .into()
         )
         .unwrap()
         .1,
@@ -406,6 +430,7 @@ fn parses_parameterized_declaration() {
                 constraints: vec![],
                 members: vec![
                     SequenceOrSetMember {
+                        is_recursive: false,
                         name: "regionId".into(),
                         tag: None,
                         ty: ASN1Type::InformationObjectFieldReference(
@@ -426,6 +451,7 @@ fn parses_parameterized_declaration() {
                         constraints: vec![]
                     },
                     SequenceOrSetMember {
+                        is_recursive: false,
                         name: "regExtValue".into(),
                         tag: None,
                         ty: ASN1Type::InformationObjectFieldReference(
@@ -472,6 +498,7 @@ fn parses_choice() {
                 high NULL,
                 ...,
                 medium NULL }"#
+                .into()
         )
         .unwrap()
         .1,
@@ -483,18 +510,21 @@ fn parses_choice() {
                 extensible: Some(2),
                 options: vec![
                     ChoiceOption {
+                        is_recursive: false,
                         name: "normal".into(),
                         tag: None,
                         ty: ASN1Type::Null,
                         constraints: vec![]
                     },
                     ChoiceOption {
+                        is_recursive: false,
                         name: "high".into(),
                         tag: None,
                         ty: ASN1Type::Null,
                         constraints: vec![]
                     },
                     ChoiceOption {
+                        is_recursive: false,
                         name: "medium".into(),
                         tag: None,
                         ty: ASN1Type::Null,
@@ -511,9 +541,27 @@ fn parses_choice() {
 
 #[test]
 fn parses_sequence_of_value() {
-    println!(
-        "{:?}",
-        top_level_value_declaration(r#"test-Sequence SEQUENCE OF INTEGER ::= { 1, 2, 3 }"#)
+    assert_eq!(
+        ToplevelValueDefinition {
+            comments: "".into(),
+            name: "test-Sequence".into(),
+            associated_type: ASN1Type::SequenceOf(SequenceOrSetOf {
+                constraints: vec![],
+                element_type: Box::new(ASN1Type::Integer(Integer {
+                    constraints: vec![],
+                    distinguished_values: None
+                })),
+                is_recursive: false
+            }),
+            parameterization: None,
+            value: ASN1Value::SequenceOrSet(vec![
+                (None, Box::new(ASN1Value::Integer(1))),
+                (None, Box::new(ASN1Value::Integer(2))),
+                (None, Box::new(ASN1Value::Integer(3)))
+            ]),
+            index: None
+        },
+        top_level_value_declaration(r#"test-Sequence SEQUENCE OF INTEGER ::= { 1, 2, 3 }"#.into())
             .unwrap()
             .1
     )
@@ -524,6 +572,7 @@ fn parses_comment_after_end() {
     assert!(end(r#"
         END
 
-        -- Generated by Asnp, the ASN.1 pretty-printer of France Telecom R&D"#)
+        -- Generated by Asnp, the ASN.1 pretty-printer of France Telecom R&D"#
+        .into())
     .is_ok())
 }

@@ -6,6 +6,12 @@ use std::vec;
 
 use super::{constraints::*, *};
 
+/// Trait shared by ASN1 `SET`, `SEQUENCE`, AND `CHOICE` that allows iterating
+/// over their field types.
+pub trait IterNameTypes {
+    fn iter_name_types(&self) -> impl Iterator<Item = (&str, &ASN1Type)>;
+}
+
 /// Trait shared by all ASN1 types that can be constrained a.k.a subtyped.
 /// *See also Rec. ITU-T X.680 (02/2021) §49 - §51*
 pub trait Constrainable {
@@ -275,6 +281,7 @@ pub struct SequenceOrSetOf {
     /// # ;
     /// ```
     pub element_type: Box<ASN1Type>,
+    pub is_recursive: bool,
 }
 
 impl From<(Option<Vec<Constraint>>, ASN1Type)> for SequenceOrSetOf {
@@ -282,6 +289,7 @@ impl From<(Option<Vec<Constraint>>, ASN1Type)> for SequenceOrSetOf {
         Self {
             constraints: value.0.unwrap_or_default(),
             element_type: Box::new(value.1),
+            is_recursive: false,
         }
     }
 }
@@ -299,6 +307,12 @@ pub struct SequenceOrSet {
     pub extensible: Option<usize>,
     pub constraints: Vec<Constraint>,
     pub members: Vec<SequenceOrSetMember>,
+}
+
+impl IterNameTypes for SequenceOrSet {
+    fn iter_name_types(&self) -> impl Iterator<Item = (&str, &ASN1Type)> {
+        self.members.iter().map(|m| (m.name.as_str(), &m.ty))
+    }
 }
 
 impl
@@ -405,6 +419,7 @@ pub enum SequenceComponent {
 /// # use rasn_compiler::prelude::ir::*;
 /// # let test =
 /// SequenceOrSetMember {
+///     is_recursive: false,
 ///     name: String::from("int-member"),
 ///     tag: Some(AsnTag {
 ///         environment: TaggingEnvironment::Automatic,
@@ -437,6 +452,7 @@ pub struct SequenceOrSetMember {
     pub ty: ASN1Type,
     pub default_value: Option<ASN1Value>,
     pub is_optional: bool,
+    pub is_recursive: bool,
     pub constraints: Vec<Constraint>,
 }
 
@@ -466,6 +482,7 @@ impl
             ty: value.2,
             is_optional: value.4.is_some() || value.5.is_some(),
             default_value: value.5,
+            is_recursive: false,
             constraints: value.3.unwrap_or_default(),
         }
     }
@@ -479,6 +496,12 @@ pub struct Choice {
     pub extensible: Option<usize>,
     pub options: Vec<ChoiceOption>,
     pub constraints: Vec<Constraint>,
+}
+
+impl IterNameTypes for Choice {
+    fn iter_name_types(&self) -> impl Iterator<Item = (&str, &ASN1Type)> {
+        self.options.iter().map(|o| (o.name.as_str(), &o.ty))
+    }
 }
 
 impl
@@ -519,6 +542,7 @@ impl
 /// # let test =
 /// ChoiceOption {
 ///     name: String::from("boolean-option"),
+///     is_recursive: false,
 ///     tag: Some(AsnTag {
 ///         environment: TaggingEnvironment::Automatic,
 ///         tag_class: TagClass::ContextSpecific,
@@ -537,6 +561,7 @@ pub struct ChoiceOption {
     pub tag: Option<AsnTag>,
     pub ty: ASN1Type,
     pub constraints: Vec<Constraint>,
+    pub is_recursive: bool,
 }
 
 impl From<(&str, Option<AsnTag>, ASN1Type, Option<Vec<Constraint>>)> for ChoiceOption {
@@ -546,6 +571,7 @@ impl From<(&str, Option<AsnTag>, ASN1Type, Option<Vec<Constraint>>)> for ChoiceO
             tag: value.1,
             ty: value.2,
             constraints: value.3.unwrap_or_default(),
+            is_recursive: false,
         }
     }
 }

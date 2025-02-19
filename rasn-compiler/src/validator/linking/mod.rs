@@ -7,7 +7,7 @@ mod types;
 mod utils;
 
 use std::{
-    borrow::{Borrow, BorrowMut},
+    borrow::{BorrowMut, Cow},
     collections::BTreeMap,
 };
 
@@ -22,17 +22,14 @@ use crate::{
 
 use self::{
     parameterization::ParameterGovernor,
-    utils::{built_in_type, find_tld_or_enum_value_by_name, octet_string_to_bit_string},
+    utils::{find_tld_or_enum_value_by_name, octet_string_to_bit_string},
 };
 
 use super::{Constraint, Parameter, TableConstraint};
 
-macro_rules! error {
+macro_rules! grammar_error {
     ($kind:ident, $($arg:tt)*) => {
-        GrammarError {
-            details: format!($($arg)*),
-            kind: GrammarErrorType::$kind,
-        }
+        GrammarError::new(&format!($($arg)*), GrammarErrorType::$kind)
     };
 }
 
@@ -187,6 +184,18 @@ impl ToplevelDefinition {
         }
     }
 
+    /// Traverses top-level declarations and marks recursive types
+    pub fn mark_recursive(&mut self) -> Result<(), GrammarError> {
+        match self {
+            ToplevelDefinition::Type(t) => {
+                let _ = t.ty.mark_recursive(&t.name)?;
+                Ok(())
+            }
+            ToplevelDefinition::Value(_v) => Ok(()), // TODO
+            ToplevelDefinition::Information(_i) => Ok(()), // TODO
+        }
+    }
+
     /// Collects supertypes of ASN1 values.
     pub fn collect_supertypes(
         &mut self,
@@ -216,14 +225,12 @@ impl ToplevelValueDefinition {
         &mut self,
         tlds: &BTreeMap<String, ToplevelDefinition>,
     ) -> Result<(), GrammarError> {
-        if let Some(ToplevelDefinition::Type(tld)) = tlds.get(&self.associated_type) {
+        if let Some(ToplevelDefinition::Type(tld)) =
+            tlds.get(self.associated_type.as_str().as_ref())
+        {
             self.value.link_with_type(tlds, &tld.ty, Some(&tld.name))
         } else {
-            let ty = match built_in_type(self.associated_type.as_str()) {
-                Some(value) => value,
-                None => return Ok(()),
-            };
-            self.value.link_with_type(tlds, &ty, None)
+            self.value.link_with_type(tlds, &self.associated_type, None)
         }
     }
 }
@@ -239,12 +246,17 @@ impl ASN1Type {
         match self {
             ASN1Type::Set(ref mut s) | ASN1Type::Sequence(ref mut s) => {
                 s.members.iter_mut().try_for_each(|m| {
+                    m.ty.collect_supertypes(tlds)?;
                     m.default_value
                         .as_mut()
                         .map(|d| d.link_with_type(tlds, &m.ty, Some(&m.ty.as_str().into_owned())))
                         .unwrap_or(Ok(()))
                 })
             }
+            ASN1Type::Choice(ref mut c) => c
+                .options
+                .iter_mut()
+                .try_for_each(|o| o.ty.collect_supertypes(tlds)),
             _ => Ok(()),
         }
     }
@@ -279,9 +291,10 @@ impl ASN1Type {
                     *self = parent.ty.clone();
                     Ok(())
                 } else {
-                    Err(error!(
+                    Err(grammar_error!(
                         LinkerError,
-                        "Could not find Choice {} of selection type.", c.choice_name
+                        "Could not find Choice {} of selection type.",
+                        c.choice_name
                     ))
                 }
             }
@@ -467,57 +480,56 @@ impl ASN1Type {
                     },
                 ) in parameters.iter().enumerate()
                 {
-                    let arg = args.get(index).ok_or_else(|| GrammarError {
-                            details: format!("Did not find an argument for parameter {dummy_reference} of {identifier}"),
-                            kind: GrammarErrorType::LinkerError,
-                        })?;
+                    let arg = args.get(index).ok_or_else(|| grammar_error!(LinkerError, "Did not find an argument for parameter {dummy_reference} of {identifier}"))?;
                     match (arg, param_governor) {
-                            (Parameter::ValueParameter(v), ParameterGovernor::TypeOrClass(gov)) => {
-                                impl_tlds.insert(
-                                    dummy_reference.clone(),
-                                    ToplevelDefinition::Value(ToplevelValueDefinition::from((
-                                        dummy_reference.as_str(),
-                                        v.clone(),
-                                        gov.as_str().borrow(),
-                                    ))),
-                                );
-                            }
-                            (Parameter::TypeParameter(t), _) => {
-                                impl_tlds.insert(
-                                    dummy_reference.clone(),
-                                    ToplevelDefinition::Type(ToplevelTypeDefinition::from((
-                                        dummy_reference.as_str(),
-                                        t.clone(),
-                                    ))),
-                                );
-                            },
-                            (Parameter::InformationObjectParameter(_), _) => todo!(),
-                            (Parameter::ObjectSetParameter(o), ParameterGovernor::Class(c)) => {
-                                match &o.values.first() {
+                        (Parameter::ValueParameter(v), ParameterGovernor::TypeOrClass(gov)) => {
+                            impl_tlds.insert(
+                                dummy_reference.clone(),
+                                ToplevelDefinition::Value(ToplevelValueDefinition::from((
+                                    dummy_reference.as_str(),
+                                    v.clone(),
+                                    gov.clone(),
+                                ))),
+                            );
+                        }
+                        (Parameter::TypeParameter(t), _) => {
+                            impl_tlds.insert(
+                                dummy_reference.clone(),
+                                ToplevelDefinition::Type(ToplevelTypeDefinition::from((
+                                    dummy_reference.as_str(),
+                                    t.clone(),
+                                ))),
+                            );
+                        }
+                        (Parameter::InformationObjectParameter(_), _) => todo!(),
+                        (Parameter::ObjectSetParameter(o), ParameterGovernor::Class(c)) => {
+                            match &o.values.first() {
                                     Some(osv) if o.values.len() == 1 => {
                                         #[allow(suspicious_double_ref_op)]
                                         table_constraint_replacements.insert(dummy_reference, osv.clone());
                                     }
-                                    _ => return Err(GrammarError { details: "Expected object set value argument to contain single object set value!".to_owned(), kind: GrammarErrorType::LinkerError })
+                                    _ => return Err(grammar_error!(LinkerError, "Expected object set value argument to contain single object set value!"))
                                 }
-                                let mut info = ASN1Information::ObjectSet(o.clone());
-                                info.link_object_set_reference(tlds);
-                                let mut tld = ToplevelInformationDefinition::from((
-                                    dummy_reference.as_str(),
-                                    info,
-                                    c.as_str()
-                                ));
-                                tld = tld.resolve_class_reference(tlds);
-                                impl_tlds.insert(
-                                    dummy_reference.clone(),
-                                    ToplevelDefinition::Information(tld),
-                                );
-                            },
-                            _ => return Err(GrammarError {
-                                details: format!("Mismatching argument for parameter {dummy_reference} of {identifier}"),
-                                kind: GrammarErrorType::LinkerError,
-                            })
+                            let mut info = ASN1Information::ObjectSet(o.clone());
+                            info.link_object_set_reference(tlds);
+                            let mut tld = ToplevelInformationDefinition::from((
+                                dummy_reference.as_str(),
+                                info,
+                                c.as_str(),
+                            ));
+                            tld = tld.resolve_class_reference(tlds);
+                            impl_tlds.insert(
+                                dummy_reference.clone(),
+                                ToplevelDefinition::Information(tld),
+                            );
                         }
+                        _ => {
+                            return Err(grammar_error!(
+                            LinkerError,
+                            "Mismatching argument for parameter {dummy_reference} of {identifier}"
+                        ))
+                        }
+                    }
                 }
                 impl_template.link_elsewhere_declared(&impl_tlds)?;
                 if let Some(replacement) =
@@ -533,12 +545,72 @@ impl ASN1Type {
                 }
                 Ok(impl_template)
             }
-            _ => Err(GrammarError {
-                details: format!(
-                    "Failed to resolve supertype {identifier} of parameterized implementation."
-                ),
-                kind: GrammarErrorType::LinkerError,
-            }),
+            _ => Err(grammar_error!(
+                LinkerError,
+                "Failed to resolve supertype {identifier} of parameterized implementation."
+            )),
+        }
+    }
+
+    /// Traverses type and marks if recursive. Returns a vector of traversed type IDs since the last recursion detection or the leaf type.
+    pub fn mark_recursive(&mut self, name: &str) -> Result<Vec<Cow<str>>, GrammarError> {
+        match self {
+            ASN1Type::Choice(choice) => {
+                let mut children = Vec::new();
+                for option in &mut choice.options {
+                    match &option.ty {
+                        ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
+                            identifier,
+                            ..
+                        }) if identifier == name => {
+                            option.is_recursive = true;
+                            continue;
+                        }
+                        _ => (),
+                    }
+                    let opt_ty_name = option.ty.as_str().into_owned();
+                    let mut opt_children = option.ty.mark_recursive(&opt_ty_name)?;
+                    if opt_children.iter().any(|id: &Cow<'_, str>| id == name) {
+                        option.is_recursive = true;
+                    } else {
+                        children.append(&mut opt_children);
+                    }
+                }
+                Ok(children)
+            }
+            ASN1Type::Set(s) | ASN1Type::Sequence(s) => {
+                let mut children = Vec::new();
+                for member in &mut s.members {
+                    match &member.ty {
+                        ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
+                            identifier,
+                            ..
+                        }) if identifier == name => {
+                            member.is_recursive = true;
+                            continue;
+                        }
+                        _ => (),
+                    }
+                    let mem_ty_name = member.ty.as_str().into_owned();
+                    let mut mem_children = member.ty.mark_recursive(&mem_ty_name)?;
+                    if mem_children.iter().any(|id: &Cow<'_, str>| id == name) {
+                        member.is_recursive = true;
+                    } else {
+                        children.append(&mut mem_children);
+                    }
+                }
+                Ok(children)
+            }
+            // SequenceOf and SetOf provide the necessary indirection
+            ASN1Type::SequenceOf(_) | ASN1Type::SetOf(_) => Ok(Vec::new()),
+            ASN1Type::ChoiceSelectionType(_) => Err(grammar_error!(
+                LinkerError,
+                "Choice selection types should be resolved by now"
+            )),
+            ASN1Type::InformationObjectFieldReference(_information_object_field_reference) => {
+                Ok(Vec::new())
+            } // TODO
+            n => Ok(vec![n.as_str()]),
         }
     }
 
@@ -620,13 +692,11 @@ impl ASN1Type {
                     *self = tld.ty.clone();
                     Ok(())
                 } else {
-                    Err(GrammarError {
-                        details: format!(
-                            "Failed to resolve argument {} of parameterized implementation.",
-                            e.identifier
-                        ),
-                        kind: GrammarErrorType::LinkerError,
-                    })
+                    Err(grammar_error!(
+                        LinkerError,
+                        "Failed to resolve argument {} of parameterized implementation.",
+                        e.identifier
+                    ))
                 }
             }
             ASN1Type::InformationObjectFieldReference(iofr) => {
@@ -642,23 +712,21 @@ impl ASN1Type {
                         return Ok(());
                     }
                 }
-                Err(GrammarError {
-                    details: format!(
-                        "Failed to resolve argument {}.{} of parameterized implementation.",
-                        iofr.class,
-                        iofr.field_path
-                            .iter()
-                            .map(|f| f.identifier().clone())
-                            .collect::<Vec<_>>()
-                            .join(".")
-                    ),
-                    kind: GrammarErrorType::LinkerError,
-                })
+                Err(grammar_error!(
+                    LinkerError,
+                    "Failed to resolve argument {}.{} of parameterized implementation.",
+                    iofr.class,
+                    iofr.field_path
+                        .iter()
+                        .map(|f| f.identifier().clone())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                ))
             }
-            ASN1Type::ChoiceSelectionType(_) => Err(GrammarError {
-                details: "Linking choice selection type is not yet supported!".to_string(),
-                kind: GrammarErrorType::NotYetInplemented,
-            }),
+            ASN1Type::ChoiceSelectionType(_) => Err(grammar_error!(
+                LinkerError,
+                "Linking choice selection type is not yet supported!"
+            )),
             _ => Ok(()),
         }
     }
@@ -724,6 +792,7 @@ impl ASN1Type {
                     .options
                     .into_iter()
                     .map(|option| ChoiceOption {
+                        is_recursive: false,
                         name: option.name,
                         tag: option.tag,
                         ty: option.ty.resolve_class_reference(tlds),
@@ -804,10 +873,11 @@ impl ASN1Value {
                 if let Some(ToplevelDefinition::Type(t)) = tlds.get(&e.identifier) {
                     self.link_with_type(tlds, &t.ty, Some(&t.name))
                 } else {
-                    Err(GrammarError {
-                        details: format!("Failed to link value with '{}'", e.identifier),
-                        kind: GrammarErrorType::LinkerError,
-                    })
+                    Err(grammar_error!(
+                        LinkerError,
+                        "Failed to link value with '{}'",
+                        e.identifier
+                    ))
                 }
             }
             (
@@ -825,7 +895,7 @@ impl ASN1Value {
                 } else if let Some((ToplevelDefinition::Type(ty), ToplevelDefinition::Value(val))) =
                     tlds.get(&e.identifier).zip(tlds.get(identifier))
                 {
-                    if ty.name != val.associated_type {
+                    if ty.name != val.associated_type.as_str() {
                         // When it comes to `DEFAULT` values, the ASN.1 type system
                         // is more lenient than Rust's. For example, the it is acceptable
                         // to pass `int-value` as a `DEFAULT` value for `Int-Like-Type` in
@@ -862,10 +932,11 @@ impl ASN1Value {
                 if let Some(ToplevelDefinition::Type(t)) = tlds.get(&e.identifier) {
                     self.link_with_type(tlds, &t.ty, Some(&t.name))
                 } else {
-                    Err(GrammarError {
-                        details: format!("Failed to link value with '{}'", e.identifier),
-                        kind: GrammarErrorType::LinkerError,
-                    })
+                    Err(grammar_error!(
+                        LinkerError,
+                        "Failed to link value with '{}'",
+                        e.identifier
+                    ))
                 }
             }
             (
@@ -884,10 +955,11 @@ impl ASN1Value {
                         Some(&option.ty.as_str().into_owned()),
                     )
                 } else {
-                    Err(GrammarError {
-                        details: format!("Failed to link value with '{}'", variant_name),
-                        kind: GrammarErrorType::LinkerError,
-                    })
+                    Err(grammar_error!(
+                        LinkerError,
+                        "Failed to link value with '{}'",
+                        variant_name
+                    ))
                 }
             }
             (ASN1Type::Choice(c), ASN1Value::LinkedNestedValue { supertypes, value })
@@ -908,10 +980,11 @@ impl ASN1Value {
                             Some(&option.ty.as_str().into_owned()),
                         )
                     } else {
-                        Err(GrammarError {
-                            details: format!("Failed to link value with '{}'", variant_name),
-                            kind: GrammarErrorType::LinkerError,
-                        })
+                        Err(grammar_error!(
+                            LinkerError,
+                            "Failed to link value with '{}'",
+                            variant_name
+                        ))
                     }
                 } else {
                     Ok(())
@@ -967,6 +1040,127 @@ impl ASN1Value {
             (ASN1Type::BitString(_), ASN1Value::OctetString(o)) => {
                 *self = ASN1Value::BitString(octet_string_to_bit_string(o));
                 Ok(())
+            }
+            (
+                ASN1Type::BitString(BitString {
+                    distinguished_values: Some(_),
+                    ..
+                }),
+                ASN1Value::SequenceOrSet(o),
+            ) => {
+                *self = ASN1Value::BitStringNamedBits(
+                    o.iter()
+                        .filter_map(|(_, v)| match &**v {
+                            ASN1Value::ElsewhereDeclaredValue { identifier, .. } => {
+                                Some(identifier.clone())
+                            }
+                            ASN1Value::EnumeratedValue { enumerable, .. } => {
+                                Some(enumerable.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                );
+                self.link_with_type(tlds, ty, type_name)
+            }
+            (
+                ASN1Type::BitString(BitString {
+                    distinguished_values: Some(_),
+                    ..
+                }),
+                ASN1Value::LinkedNestedValue { value, .. },
+            ) if matches![**value, ASN1Value::SequenceOrSet(_)] => {
+                if let ASN1Value::SequenceOrSet(o) = &**value {
+                    *value = Box::new(ASN1Value::BitStringNamedBits(
+                        o.iter()
+                            .filter_map(|(_, v)| match &**v {
+                                ASN1Value::ElsewhereDeclaredValue { identifier, .. } => {
+                                    Some(identifier.clone())
+                                }
+                                ASN1Value::EnumeratedValue { enumerable, .. } => {
+                                    Some(enumerable.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                    ));
+                    self.link_with_type(tlds, ty, type_name)?;
+                }
+                Ok(())
+            }
+            (
+                ASN1Type::BitString(BitString {
+                    distinguished_values: Some(_),
+                    ..
+                }),
+                ASN1Value::ObjectIdentifier(o),
+            ) => {
+                *self = ASN1Value::BitStringNamedBits(
+                    o.0.iter().filter_map(|arc| arc.name.clone()).collect(),
+                );
+                self.link_with_type(tlds, ty, type_name)
+            }
+            (
+                ASN1Type::BitString(BitString {
+                    distinguished_values: Some(_),
+                    ..
+                }),
+                ASN1Value::LinkedNestedValue { value, .. },
+            ) if matches![**value, ASN1Value::ObjectIdentifier(_)] => {
+                if let ASN1Value::ObjectIdentifier(o) = &**value {
+                    *value = Box::new(ASN1Value::BitStringNamedBits(
+                        o.0.iter().filter_map(|arc| arc.name.clone()).collect(),
+                    ));
+                    self.link_with_type(tlds, ty, type_name)?;
+                }
+                Ok(())
+            }
+            (
+                ASN1Type::BitString(BitString {
+                    distinguished_values: Some(distinguished),
+                    ..
+                }),
+                ASN1Value::BitStringNamedBits(o),
+            ) => {
+                if let Some(highest_distinguished_bit) = distinguished.iter().map(|d| d.value).max()
+                {
+                    *self = ASN1Value::BitString(bit_string_value_from_named_bits(
+                        highest_distinguished_bit,
+                        o,
+                        distinguished,
+                    ));
+                    Ok(())
+                } else {
+                    Err(GrammarError {
+                        details: format!("Failed to resolve BIT STRING value {o:?}"),
+                        kind: GrammarErrorType::LinkerError,
+                        pdu: None,
+                    })
+                }
+            }
+            (
+                ASN1Type::BitString(BitString {
+                    distinguished_values: Some(distinguished),
+                    ..
+                }),
+                ASN1Value::LinkedNestedValue { value, .. },
+            ) if matches![**value, ASN1Value::BitStringNamedBits(_)] => {
+                if let (ASN1Value::BitStringNamedBits(o), Some(highest_distinguished_bit)) =
+                    (&**value, distinguished.iter().map(|d| d.value).max())
+                {
+                    *value = Box::new(ASN1Value::BitString(bit_string_value_from_named_bits(
+                        highest_distinguished_bit,
+                        o,
+                        distinguished,
+                    )));
+                    Ok(())
+                } else {
+                    Err(GrammarError {
+                        details: format!("Failed to resolve BIT STRING value {value:?}"),
+                        kind: GrammarErrorType::LinkerError,
+                        pdu: None,
+                    })
+                }
             }
             (ASN1Type::BitString(_), ASN1Value::LinkedNestedValue { value, .. })
                 if matches![**value, ASN1Value::OctetString(_)] =>
@@ -1080,7 +1274,7 @@ impl ASN1Value {
                 }
                 Ok(())
             }
-            (_, ASN1Value::ElsewhereDeclaredValue { .. }) => todo!(),
+            (_, ASN1Value::ElsewhereDeclaredValue { .. }) => Err(GrammarError::todo()),
             _ => Ok(()),
         }
     }
@@ -1177,21 +1371,20 @@ impl ASN1Value {
                     ),
                     (false, _) => Some(member.ty.as_str().into_owned()),
                     _ => {
-                        return Err(GrammarError {
-                            details: format!(
-                                "Failed to determine parent name of field {}",
-                                member.name
-                            ),
-                            kind: GrammarErrorType::LinkerError,
-                        })
+                        return Err(grammar_error!(
+                            LinkerError,
+                            "Failed to determine parent name of field {}",
+                            member.name
+                        ))
                     }
                 };
                 v.1.link_with_type(tlds, &member.ty, type_name.as_ref())
             } else {
-                Err(GrammarError {
-                    details: format!("Failed to link value with '{:?}'", v.0),
-                    kind: GrammarErrorType::LinkerError,
-                })
+                Err(grammar_error!(
+                    LinkerError,
+                    "Failed to link value with '{:?}'",
+                    v.0
+                ))
             }
         })?;
 
@@ -1207,9 +1400,8 @@ impl ASN1Value {
                         .default_value
                         .as_ref()
                         .map(|d| StructLikeFieldValue::Implicit(Box::new(d.clone()))))
-                    .ok_or_else(|| GrammarError {
-                        details: format!("No value for field {} found!", member.name),
-                        kind: GrammarErrorType::LinkerError,
+                    .ok_or_else(|| {
+                        grammar_error!(LinkerError, "No value for field {} found!", member.name)
                     })
                     .map(|field_value| (member.name.clone(), member.ty.clone(), field_value))
             })
@@ -1253,7 +1445,7 @@ impl ASN1Value {
         } = self
         {
             if object_name.contains('.') {
-                return Err(error!(NotYetInplemented, "Value references of path length > 2 are not yet supported! Found reference {object_name}.{identifier}"));
+                return Err(grammar_error!(NotYetInplemented, "Value references of path length > 2 are not yet supported! Found reference {object_name}.{identifier}"));
             }
             let object = get_declaration![
                 tlds,
@@ -1261,7 +1453,7 @@ impl ASN1Value {
                 Information,
                 ASN1Information::Object
             ]
-            .ok_or_else(|| error!(LinkerError, "No information object found for identifier {object_name}, parent of {identifier}"))?;
+            .ok_or_else(|| grammar_error!(LinkerError, "No information object found for identifier {object_name}, parent of {identifier}"))?;
             match &object.fields {
                 InformationObjectFields::DefaultSyntax(d) => {
                     match d.iter().find(|elem| elem.identifier() == identifier) {
@@ -1269,7 +1461,7 @@ impl ASN1Value {
                             *self = value.clone();
                             return Ok(())
                         }
-                        _ => return Err(error!(
+                        _ => return Err(grammar_error!(
                             LinkerError,
                                 "No matching value field for identifier {identifier} found in object {object_name}"
                         ))
@@ -1284,13 +1476,13 @@ impl ASN1Value {
                         ASN1Information::ObjectClass
                     ]
                     .ok_or_else(|| {
-                        error!(
+                        grammar_error!(
                             LinkerError,
                             "No information object class found for identifier {class_name}"
                         )
                     })?;
                     let syntax = class.syntax.as_ref().ok_or_else(|| {
-                        error!(LinkerError, "No syntax info found for class {class_name}")
+                        grammar_error!(LinkerError, "No syntax info found for class {class_name}")
                     })?;
                     let tokens = syntax.flatten();
                     let (mut before, mut after) = (None, None);
@@ -1323,7 +1515,7 @@ impl ASN1Value {
                             };
                         }
                     }
-                    return Err(error!(
+                    return Err(grammar_error!(
                         LinkerError,
                         "Failed to match expression to syntax of class {class_name}"
                     ));
@@ -1360,6 +1552,23 @@ impl ASN1Value {
         }
         Ok(())
     }
+}
+
+fn bit_string_value_from_named_bits(
+    highest_distinguished_bit: i128,
+    named_bits: &[String],
+    distinguished: &[DistinguishedValue],
+) -> Vec<bool> {
+    (0..=highest_distinguished_bit)
+        .map(|i| {
+            named_bits.iter().any(|bit| {
+                Some(bit)
+                    == distinguished
+                        .iter()
+                        .find_map(|d| (d.value == i).then_some(&d.name))
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1413,6 +1622,7 @@ mod tests {
                         extensible: None,
                         constraints: vec![],
                         options: vec![ChoiceOption {
+                            is_recursive: false,
                             name: String::from("first"),
                             constraints: vec![],
                             tag: None,
@@ -1431,7 +1641,11 @@ mod tests {
             comments: String::new(),
             name: "exampleValue".into(),
             parameterization: None,
-            associated_type: "BaseChoice".into(),
+            associated_type: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
+                parent: None,
+                identifier: "BaseChoice".into(),
+                constraints: vec![],
+            }),
             index: None,
             value: ASN1Value::Choice {
                 type_name: None,
@@ -1445,7 +1659,11 @@ mod tests {
             ToplevelValueDefinition {
                 comments: "".into(),
                 name: "exampleValue".into(),
-                associated_type: "BaseChoice".into(),
+                associated_type: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
+                    parent: None,
+                    identifier: "BaseChoice".into(),
+                    constraints: vec![]
+                }),
                 parameterization: None,
                 value: ASN1Value::Choice {
                     type_name: Some("BaseChoice".into()),

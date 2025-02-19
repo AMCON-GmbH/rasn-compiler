@@ -7,14 +7,17 @@ use std::{
     str::FromStr,
 };
 
-use crate::intermediate::*;
+use crate::{error::CompilerError, intermediate::*};
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use super::{error::GeneratorError, Backend, GeneratedModule};
+use super::{
+    error::{GeneratorError, GeneratorErrorType},
+    Backend, GeneratedModule,
+};
 
 mod builder;
 mod template;
@@ -25,6 +28,8 @@ mod utils;
 /// the `rasn` framework for rust.
 pub struct Rasn {
     config: Config,
+    tagging_environment: TaggingEnvironment,
+    extensibility_environment: ExtensibilityEnvironment,
 }
 
 #[cfg_attr(target_family = "wasm", wasm_bindgen)]
@@ -46,16 +51,27 @@ pub struct Config {
     /// is set to `true` , the compiler will import the entire module using
     /// the wildcard `*` for each module that the input ASN.1 module imports from.
     pub default_wildcard_imports: bool,
+    /// To make working with the generated types a bit more ergonomic, the compiler
+    /// can generate `From` impls for the wrapper inner types in a `CHOICE`, as long
+    /// as the generated impls are not ambiguous.
+    /// This is disabled by default to generate less code, but can be enabled with
+    /// `generate_from_impls` set to `true`.
+    pub generate_from_impls: bool,
 }
 
 #[cfg(target_family = "wasm")]
 #[wasm_bindgen]
 impl Config {
     #[wasm_bindgen(constructor)]
-    pub fn new(opaque_open_types: bool, default_wildcard_imports: bool) -> Self {
+    pub fn new(
+        opaque_open_types: bool,
+        default_wildcard_imports: bool,
+        generate_from_impls: Option<bool>,
+    ) -> Self {
         Self {
             opaque_open_types,
             default_wildcard_imports,
+            generate_from_impls: generate_from_impls.unwrap_or(false),
         }
     }
 }
@@ -65,6 +81,7 @@ impl Default for Config {
         Self {
             opaque_open_types: true,
             default_wildcard_imports: false,
+            generate_from_impls: false,
         }
     }
 }
@@ -74,8 +91,23 @@ impl Backend for Rasn {
 
     const FILE_EXTENSION: &'static str = ".rs";
 
+    fn new(
+        config: Self::Config,
+        tagging_environment: TaggingEnvironment,
+        extensibility_environment: ExtensibilityEnvironment,
+    ) -> Self {
+        Self {
+            config,
+            extensibility_environment,
+            tagging_environment,
+        }
+    }
+
     fn from_config(config: Self::Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            ..Default::default()
+        }
     }
 
     fn config(&self) -> &Self::Config {
@@ -83,11 +115,13 @@ impl Backend for Rasn {
     }
 
     fn generate_module(
-        &self,
+        &mut self,
         tlds: Vec<ToplevelDefinition>,
     ) -> Result<GeneratedModule, GeneratorError> {
         if let Some((module_ref, _)) = tlds.first().and_then(|tld| tld.get_index().cloned()) {
             let module = module_ref.borrow();
+            self.tagging_environment = module.tagging_environment;
+            self.extensibility_environment = module.extensibility_environment;
             let name = self.to_rust_snake_case(&module.name);
             let imports = module.imports.iter().map(|import| {
                 let module =
@@ -114,7 +148,7 @@ impl Backend for Rasn {
                 };
                 quote!(use super:: #module::{ #(#used_imports),* };)
             });
-            let (pdus, warnings): (Vec<TokenStream>, Vec<Box<dyn Error>>) =
+            let (pdus, warnings): (Vec<TokenStream>, Vec<CompilerError>) =
                 tlds.into_iter().fold((vec![], vec![]), |mut acc, tld| {
                     match self.generate_tld(tld) {
                         Ok(s) => {
@@ -122,14 +156,15 @@ impl Backend for Rasn {
                             acc
                         }
                         Err(e) => {
-                            acc.1.push(Box::new(e));
+                            acc.1.push(e.into());
                             acc
                         }
                     }
                 });
             Ok(GeneratedModule {
                 generated: Some(quote! {
-                #[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, unused)]
+                #[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, unused,
+                        clippy::too_many_arguments,)]
                 pub mod #name {
                     extern crate alloc;
 
@@ -147,10 +182,54 @@ impl Backend for Rasn {
         }
     }
 
-    fn format_bindings(bindings: &str) -> Result<String, Box<dyn Error>> {
-        let mut rustfmt = PathBuf::from(env::var("CARGO_HOME")?);
-        rustfmt.push("bin/rustfmt");
-        let mut cmd = Command::new(&*rustfmt);
+    fn format_bindings(bindings: &str) -> Result<String, CompilerError> {
+        Self::internal_fmt(bindings).map_err(|e| {
+            GeneratorError {
+                top_level_declaration: None,
+                details: e.to_string(),
+                kind: GeneratorErrorType::FormattingError,
+            }
+            .into()
+        })
+    }
+
+    fn generate(&self, tld: ToplevelDefinition) -> Result<String, GeneratorError> {
+        self.generate_tld(tld).map(|ts| ts.to_string())
+    }
+}
+
+impl Rasn {
+    fn get_rustfmt_path() -> Result<PathBuf, Box<dyn Error>> {
+        // Try ~/.cargo/bin/rustfmt style paths first
+        if let Ok(path) = env::var("CARGO_HOME")
+            .map(PathBuf::from)
+            .map(|mut path| {
+                path.push("bin/rustfmt");
+                path
+            }) {
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        // Alternatively, maybe rustfmt and cargo are in the same directory
+        if let Ok(path) = env::var("CARGO")
+            .map(PathBuf::from)
+            .map(|mut path| {
+                path.set_file_name("rustfmt");
+                path
+            }) {
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        Err("No rustfmt found.".into())
+    }
+
+    fn internal_fmt(bindings: &str) -> Result<String, Box<dyn Error>> {
+        let rustfmt = Self::get_rustfmt_path()?;
+        let mut cmd = Command::new(rustfmt);
 
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
 
@@ -191,9 +270,5 @@ impl Backend for Rasn {
             },
             _ => Ok(bindings),
         }
-    }
-
-    fn generate(&self, tld: ToplevelDefinition) -> Result<String, GeneratorError> {
-        self.generate_tld(tld).map(|ts| ts.to_string())
     }
 }

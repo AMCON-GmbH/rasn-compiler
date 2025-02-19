@@ -10,7 +10,7 @@ r#"
         ImplType ::= ParamType { 2, TRUE }
     "#,
 r#"
-        #[derive (AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+        #[derive (AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #[rasn (automatic_tags)]
         pub struct ImplType {
             #[rasn(value("2..=12"), identifier = "int-value")]
@@ -73,7 +73,7 @@ e2e_pdu! {
     "#,
     r#"
     #[doc = " Anonymous SEQUENCE OF member "]
-    #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+    #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
     #[rasn(automatic_tags, identifier = "SEQUENCE")]
     pub struct AnonymousA2XPC5FlowBitRatesIEExtensions {
         pub id: Integer,
@@ -103,12 +103,12 @@ e2e_pdu! {
         }
     }
     #[doc = " Inner type "]
-    #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+    #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
     #[rasn(delegate, size("1.."))]
     pub struct A2XPC5FlowBitRatesIEExtensions(
         pub SequenceOf<AnonymousA2XPC5FlowBitRatesIEExtensions>,
     );
-    #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq)]
+    #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
     #[rasn(automatic_tags, identifier = "A2X-PC5-FlowBitRates")]
     #[non_exhaustive]
     pub struct A2XPC5FlowBitRates {
@@ -281,4 +281,81 @@ e2e_pdu! {
         }
     }
     "#
+}
+
+e2e_pdu! {
+anonymous_type_param,
+r#"
+            SetupRelease { ElementTypeParam } ::= CHOICE { 
+                release         NULL,
+                setup           ElementTypeParam 
+            }
+
+            LocationMeasurementInfo ::= SEQUENCE {
+                test BOOLEAN
+            }
+
+            LocationMeasurementIndication-IEs ::=       SEQUENCE { 
+                measurementIndication      SetupRelease { LocationMeasurementInfo }, 
+                lateNonCriticalExtension   OCTET STRING OPTIONAL,
+                nonCriticalExtension       SEQUENCE{} OPTIONAL 
+            }
+        "#,
+    r#"
+            #[doc = "Inner type"]
+            #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+            #[rasn(choice, automatic_tags)]
+            pub enum LocationMeasurementIndicationIEsMeasurementIndication {
+                release(()),
+                setup(LocationMeasurementInfo),
+            }
+            
+            #[doc = "Inner type"]
+            #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+            #[rasn(automatic_tags)]
+            pub struct LocationMeasurementIndicationIEsNonCriticalExtension {}
+            
+            impl LocationMeasurementIndicationIEsNonCriticalExtension {
+                pub fn new() -> Self {
+                    Self {} 
+                }
+            }
+            
+            #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+            #[rasn(automatic_tags, identifier = "LocationMeasurementIndication-IEs")]
+            pub struct LocationMeasurementIndicationIEs {
+                #[rasn(identifier = "measurementIndication")]
+                pub measurement_indication: LocationMeasurementIndicationIEsMeasurementIndication,
+                #[rasn(identifier = "lateNonCriticalExtension")]
+                pub late_non_critical_extension: Option<OctetString>,
+                #[rasn(identifier = "nonCriticalExtension")]
+                pub non_critical_extension: Option<LocationMeasurementIndicationIEsNonCriticalExtension>,
+            }
+            
+            impl LocationMeasurementIndicationIEs {
+                pub fn new(
+                    measurement_indication: LocationMeasurementIndicationIEsMeasurementIndication,
+                    late_non_critical_extension: Option<OctetString>,
+                    non_critical_extension: Option<LocationMeasurementIndicationIEsNonCriticalExtension>,
+                ) -> Self {
+                    Self {
+                        measurement_indication,
+                        late_non_critical_extension,
+                        non_critical_extension,
+                    }
+                }
+            }
+            
+            #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+            #[rasn(automatic_tags)]
+            pub struct LocationMeasurementInfo { 
+                pub test: bool,
+            }
+            
+            impl LocationMeasurementInfo {
+                pub fn new(test: bool) -> Self {
+                    Self { test }
+                }
+            }
+        "#
 }

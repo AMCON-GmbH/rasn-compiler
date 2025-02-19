@@ -8,14 +8,13 @@ use crate::intermediate::{
         ASN1Information, ClassLink, InformationObjectClass, InformationObjectFields,
         ObjectSetValue, ToplevelInformationDefinition,
     },
-    ASN1Type, ASN1Value, ToplevelDefinition, ToplevelTypeDefinition, ToplevelValueDefinition,
-    BIT_STRING, BOOLEAN, GENERALIZED_TIME, INTEGER, NULL, OCTET_STRING, UTC_TIME,
+    ASN1Type, ASN1Value, CharacterStringType, ToplevelDefinition, ToplevelTypeDefinition,
+    ToplevelValueDefinition,
 };
 
 use super::{
-    information_object::InformationObjectClassField, template::*, Rasn, BMP_STRING, GENERAL_STRING,
-    IA5_STRING, NUMERIC_STRING, OBJECT_IDENTIFIER, PRINTABLE_STRING, SEQUENCE_OF, SET_OF,
-    UTF8_STRING, VISIBLE_STRING,
+    information_object::InformationObjectClassField, template::*, ExtensibilityEnvironment, Rasn,
+    TaggingEnvironment,
 };
 use crate::generator::error::{GeneratorError, GeneratorErrorType};
 
@@ -130,27 +129,25 @@ impl Rasn {
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Value::LinkedIntValue { integer_type, .. } = tld.value {
             let formatted_value = self.value_to_tokens(&tld.value, None)?;
-            let ty = self.to_rust_title_case(&tld.associated_type);
-            if tld.associated_type == INTEGER {
+            let (ty, val) = if tld.associated_type.is_builtin_type() {
+                (integer_type.into_token_stream(), formatted_value)
+            } else {
+                let ty = self.to_rust_title_case(&tld.associated_type.as_str());
+                (ty.clone(), quote!(#ty(#formatted_value)))
+            };
+            if integer_type.is_unbounded() {
                 Ok(lazy_static_value_template(
                     self.format_comments(&tld.comments)?,
                     self.to_rust_const_case(&tld.name),
-                    quote!(Integer),
-                    formatted_value,
-                ))
-            } else if integer_type.is_unbounded() {
-                Ok(lazy_static_value_template(
-                    self.format_comments(&tld.comments)?,
-                    self.to_rust_const_case(&tld.name),
-                    ty.clone(),
-                    quote!(#ty(#formatted_value)),
+                    ty,
+                    val,
                 ))
             } else {
                 Ok(integer_value_template(
                     self.format_comments(&tld.comments)?,
                     self.to_rust_const_case(&tld.name),
-                    ty.clone(),
-                    quote!(#ty(#formatted_value)),
+                    ty,
+                    val,
                 ))
             }
         } else {
@@ -201,11 +198,10 @@ impl Rasn {
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::BitString(ref bitstr) = tld.ty {
             let name = self.to_rust_title_case(&tld.name);
-            let mut annotations = vec![
-                quote!(delegate),
-                self.format_range_annotations(true, &bitstr.constraints)?,
-                self.format_tag(tld.tag.as_ref(), false),
-            ];
+            let mut annotations = vec![quote!(delegate), self.format_tag(tld.tag.as_ref(), false)];
+            if bitstr.fixed_size().is_none() {
+                annotations.push(self.format_range_annotations(true, &bitstr.constraints)?);
+            }
             if name.to_string() != tld.name {
                 annotations.push(self.format_identifier_annotation(
                     &tld.name,
@@ -213,11 +209,20 @@ impl Rasn {
                     &tld.ty,
                 ));
             }
-            Ok(bit_string_template(
-                self.format_comments(&tld.comments)?,
-                name,
-                self.join_annotations(annotations),
-            ))
+            if let Some(size) = bitstr.fixed_size() {
+                Ok(fixed_bit_string_template(
+                    self.format_comments(&tld.comments)?,
+                    name,
+                    self.join_annotations(annotations),
+                    size.to_token_stream(),
+                ))
+            } else {
+                Ok(bit_string_template(
+                    self.format_comments(&tld.comments)?,
+                    name,
+                    self.join_annotations(annotations),
+                ))
+            }
         } else {
             Err(GeneratorError::new(
                 Some(ToplevelDefinition::Type(tld)),
@@ -233,11 +238,10 @@ impl Rasn {
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::OctetString(ref oct_str) = tld.ty {
             let name = self.to_rust_title_case(&tld.name);
-            let mut annotations = vec![
-                quote!(delegate),
-                self.format_range_annotations(true, &oct_str.constraints)?,
-                self.format_tag(tld.tag.as_ref(), false),
-            ];
+            let mut annotations = vec![quote!(delegate), self.format_tag(tld.tag.as_ref(), false)];
+            if oct_str.fixed_size().is_none() {
+                annotations.push(self.format_range_annotations(true, &oct_str.constraints)?);
+            }
             if name.to_string() != tld.name {
                 annotations.push(self.format_identifier_annotation(
                     &tld.name,
@@ -245,11 +249,20 @@ impl Rasn {
                     &tld.ty,
                 ));
             }
-            Ok(octet_string_template(
-                self.format_comments(&tld.comments)?,
-                name,
-                self.join_annotations(annotations),
-            ))
+            if let Some(size) = oct_str.fixed_size() {
+                Ok(fixed_octet_string_template(
+                    self.format_comments(&tld.comments)?,
+                    name,
+                    self.join_annotations(annotations),
+                    size.to_token_stream(),
+                ))
+            } else {
+                Ok(octet_string_template(
+                    self.format_comments(&tld.comments)?,
+                    name,
+                    self.join_annotations(annotations),
+                ))
+            }
         } else {
             Err(GeneratorError::new(
                 Some(ToplevelDefinition::Type(tld)),
@@ -322,19 +335,21 @@ impl Rasn {
         &self,
         tld: ToplevelValueDefinition,
     ) -> Result<TokenStream, GeneratorError> {
-        let ty = tld.associated_type.as_str();
+        let ty = &tld.associated_type;
         match &tld.value {
-            ASN1Value::Null if ty == NULL => {
+            ASN1Value::Null if ty.is_builtin_type() => {
                 call_template!(self, primitive_value_template, tld, quote!(()), quote!(()))
             }
-            ASN1Value::Null => call_template!(
-                self,
-                primitive_value_template,
-                tld,
-                self.to_rust_title_case(&tld.associated_type),
-                assignment!(self, &tld.associated_type, quote!(()))
-            ),
-            ASN1Value::Boolean(b) if ty == BOOLEAN => call_template!(
+            ASN1Value::Null => {
+                call_template!(
+                    self,
+                    primitive_value_template,
+                    tld,
+                    self.to_rust_title_case(&ty.as_str()),
+                    assignment!(self, &ty.as_str(), quote!(()))
+                )
+            }
+            ASN1Value::Boolean(b) if ty.is_builtin_type() => call_template!(
                 self,
                 primitive_value_template,
                 tld,
@@ -345,18 +360,18 @@ impl Rasn {
                 self,
                 primitive_value_template,
                 tld,
-                self.to_rust_title_case(&tld.associated_type),
-                assignment!(self, &tld.associated_type, b.to_token_stream())
+                self.to_rust_title_case(&ty.as_str()),
+                assignment!(self, &ty.as_str(), b.to_token_stream())
             ),
             ASN1Value::LinkedIntValue { .. } => self.generate_integer_value(tld),
-            ASN1Value::BitString(_) if ty == BIT_STRING => call_template!(
+            ASN1Value::BitString(_) if ty.is_builtin_type() => call_template!(
                 self,
                 lazy_static_value_template,
                 tld,
                 quote!(BitString),
                 self.value_to_tokens(&tld.value, None)?
             ),
-            ASN1Value::OctetString(_) if ty == OCTET_STRING => call_template!(
+            ASN1Value::OctetString(_) if ty.is_builtin_type() => call_template!(
                 self,
                 lazy_static_value_template,
                 tld,
@@ -373,7 +388,7 @@ impl Rasn {
                         self,
                         const_choice_value_template,
                         tld,
-                        self.to_rust_title_case(&tld.associated_type),
+                        self.to_rust_title_case(&ty.as_str()),
                         self.to_rust_enum_identifier(variant_name),
                         self.value_to_tokens(inner_value, None)?
                     )
@@ -382,7 +397,7 @@ impl Rasn {
                         self,
                         choice_value_template,
                         tld,
-                        self.to_rust_title_case(&tld.associated_type),
+                        self.to_rust_title_case(&ty.as_str()),
                         self.to_rust_enum_identifier(variant_name),
                         self.value_to_tokens(inner_value, None)?
                     )
@@ -398,20 +413,27 @@ impl Rasn {
                 self.to_rust_title_case(enumerated),
                 self.to_rust_enum_identifier(enumerable)
             ),
-            ASN1Value::Time(_) if ty == GENERALIZED_TIME => call_template!(
-                self,
-                lazy_static_value_template,
-                tld,
-                quote!(GeneralizedTime),
-                self.value_to_tokens(&tld.value, Some(&quote!(GeneralizedTime)))?
-            ),
-            ASN1Value::Time(_) if ty == UTC_TIME => call_template!(
-                self,
-                lazy_static_value_template,
-                tld,
-                quote!(UtcTime),
-                self.value_to_tokens(&tld.value, Some(&quote!(UtcTime)))?
-            ),
+            ASN1Value::Time(_) if ty.is_builtin_type() => match ty {
+                ASN1Type::GeneralizedTime(_) => call_template!(
+                    self,
+                    lazy_static_value_template,
+                    tld,
+                    quote!(GeneralizedTime),
+                    self.value_to_tokens(&tld.value, Some(&quote!(GeneralizedTime)))?
+                ),
+                ASN1Type::UTCTime(_) => call_template!(
+                    self,
+                    lazy_static_value_template,
+                    tld,
+                    quote!(UtcTime),
+                    self.value_to_tokens(&tld.value, Some(&quote!(UtcTime)))?
+                ),
+                _ => Err(GeneratorError::new(
+                    Some(ToplevelDefinition::Value(tld)),
+                    "Time value does not match expected type",
+                    GeneratorErrorType::Asn1TypeMismatch,
+                )),
+            },
             ASN1Value::LinkedStructLikeValue(s) => {
                 let members = s
                     .iter()
@@ -423,7 +445,7 @@ impl Rasn {
                     self,
                     sequence_or_set_value_template,
                     tld,
-                    self.to_rust_title_case(&tld.associated_type),
+                    self.to_rust_title_case(&ty.as_str()),
                     quote!(#(#members),*)
                 )
             }
@@ -434,10 +456,10 @@ impl Rasn {
                         self,
                         primitive_value_template,
                         tld,
-                        self.to_rust_title_case(&tld.associated_type),
+                        self.to_rust_title_case(&ty.as_str()),
                         assignment!(
                             self,
-                            &tld.associated_type,
+                            &ty.as_str(),
                             self.value_to_tokens(&tld.value, parent.as_ref())?
                         )
                     )
@@ -446,89 +468,65 @@ impl Rasn {
                         self,
                         lazy_static_value_template,
                         tld,
-                        self.to_rust_title_case(&tld.associated_type),
+                        self.to_rust_title_case(&ty.as_str()),
                         assignment!(
                             self,
-                            &tld.associated_type,
+                            &ty.as_str(),
                             self.value_to_tokens(&tld.value, parent.as_ref())?
                         )
                     )
                 }
             }
-            ASN1Value::ObjectIdentifier(_) if ty == OBJECT_IDENTIFIER => call_template!(
+            ASN1Value::ObjectIdentifier(_) if ty.is_builtin_type() => call_template!(
                 self,
                 lazy_static_value_template,
                 tld,
                 quote!(ObjectIdentifier),
                 self.value_to_tokens(&tld.value, None)?
             ),
-            ASN1Value::LinkedCharStringValue(_, _) if ty == NUMERIC_STRING => call_template!(
-                self,
-                lazy_static_value_template,
-                tld,
-                quote!(NumericString),
-                self.value_to_tokens(&tld.value, None)?
-            ),
-            ASN1Value::LinkedCharStringValue(_, _) if ty == VISIBLE_STRING => call_template!(
-                self,
-                lazy_static_value_template,
-                tld,
-                quote!(VisibleString),
-                self.value_to_tokens(&tld.value, None)?
-            ),
-            ASN1Value::LinkedCharStringValue(_, _) if ty == IA5_STRING => call_template!(
-                self,
-                lazy_static_value_template,
-                tld,
-                quote!(IA5String),
-                self.value_to_tokens(&tld.value, None)?
-            ),
-            ASN1Value::LinkedCharStringValue(_, _) if ty == UTF8_STRING => call_template!(
-                self,
-                lazy_static_value_template,
-                tld,
-                quote!(UTF8String),
-                self.value_to_tokens(&tld.value, None)?
-            ),
-            ASN1Value::LinkedCharStringValue(_, _) if ty == BMP_STRING => call_template!(
-                self,
-                lazy_static_value_template,
-                tld,
-                quote!(BMPString),
-                self.value_to_tokens(&tld.value, None)?
-            ),
-            ASN1Value::LinkedCharStringValue(_, _) if ty == PRINTABLE_STRING => call_template!(
-                self,
-                lazy_static_value_template,
-                tld,
-                quote!(PrintableString),
-                self.value_to_tokens(&tld.value, None)?
-            ),
-            ASN1Value::LinkedCharStringValue(_, _) if ty == GENERAL_STRING => call_template!(
-                self,
-                lazy_static_value_template,
-                tld,
-                quote!(GeneralString),
-                self.value_to_tokens(&tld.value, None)?
-            ),
-            ASN1Value::LinkedArrayLikeValue(s) if ty.contains(SEQUENCE_OF) => {
-                let item_type = self.format_sequence_or_set_of_item_type(
-                    ty.replace(SEQUENCE_OF, "").trim().to_string(),
-                    s.first().map(|i| &**i),
-                );
+            ASN1Value::LinkedCharStringValue(cs_ty, _) if ty.is_builtin_type() => {
+                let ty_ts = match cs_ty {
+                    CharacterStringType::NumericString => quote!(NumericString),
+                    CharacterStringType::VisibleString => quote!(VisibleString),
+                    CharacterStringType::IA5String => quote!(IA5String),
+                    CharacterStringType::UTF8String => quote!(UTF8String),
+                    CharacterStringType::BMPString => quote!(BMPString),
+                    CharacterStringType::PrintableString => quote!(PrintableString),
+                    CharacterStringType::GeneralString => quote!(GeneralString),
+                    CharacterStringType::GraphicString => quote!(GraphicString),
+                    CharacterStringType::TeletexString
+                    | CharacterStringType::VideotexString
+                    | CharacterStringType::UniversalString => {
+                        return Err(GeneratorError::new(
+                            None,
+                            &format!("{:?} values are currently unsupported", cs_ty),
+                            GeneratorErrorType::NotYetInplemented,
+                        ))
+                    }
+                };
                 call_template!(
                     self,
                     lazy_static_value_template,
                     tld,
-                    quote!(Vec<#item_type>),
+                    ty_ts,
                     self.value_to_tokens(&tld.value, None)?
                 )
             }
-            ASN1Value::LinkedArrayLikeValue(s) if ty.contains(SET_OF) => {
+            ASN1Value::LinkedArrayLikeValue(s) if ty.is_builtin_type() => {
                 let item_type = self.format_sequence_or_set_of_item_type(
-                    ty.replace(SET_OF, "").trim().to_string(),
+                    match ty {
+                        ASN1Type::SequenceOf(seq) => &*seq.element_type,
+                        ASN1Type::SetOf(set) => &*set.element_type,
+                        _ => {
+                            return Err(GeneratorError::new(
+                                Some(ToplevelDefinition::Value(tld)),
+                                "LinkedArrayLikeValue does not match SEQUENCE/SET OF type",
+                                GeneratorErrorType::Asn1TypeMismatch,
+                            ))
+                        }
+                    },
                     s.first().map(|i| &**i),
-                );
+                )?;
                 call_template!(
                     self,
                     lazy_static_value_template,
@@ -547,12 +545,8 @@ impl Rasn {
                 self,
                 lazy_static_value_template,
                 tld,
-                self.to_rust_title_case(&tld.associated_type),
-                assignment!(
-                    self,
-                    &tld.associated_type,
-                    self.value_to_tokens(&tld.value, None)?
-                )
+                self.to_rust_title_case(&ty.as_str()),
+                assignment!(self, &ty.as_str(), self.value_to_tokens(&tld.value, None)?)
             ),
             _ => Ok(TokenStream::new()),
         }
@@ -697,6 +691,10 @@ impl Rasn {
         if let ASN1Type::Enumerated(ref enumerated) = tld.ty {
             let extensible = enumerated
                 .extensible
+                .or(
+                    (self.extensibility_environment == ExtensibilityEnvironment::Implied)
+                        .then_some(enumerated.members.len()),
+                )
                 .map(|_| {
                     quote! {
                     #[non_exhaustive]}
@@ -734,15 +732,24 @@ impl Rasn {
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::Choice(ref choice) = tld.ty {
             let name = self.to_rust_title_case(&tld.name);
-            let inner_options = self.format_nested_choice_options(choice, &name.to_string())?;
             let extensible = choice
                 .extensible
+                .or(
+                    (self.extensibility_environment == ExtensibilityEnvironment::Implied)
+                        .then_some(choice.options.len()),
+                )
                 .map(|_| {
                     quote! {
                     #[non_exhaustive]}
                 })
                 .unwrap_or_default();
-            let mut annotations = vec![quote!(choice), self.format_tag(tld.tag.as_ref(), true)];
+            let mut annotations = vec![
+                quote!(choice),
+                self.format_tag(
+                    tld.tag.as_ref(),
+                    self.tagging_environment == TaggingEnvironment::Automatic,
+                ),
+            ];
             if name.to_string() != tld.name {
                 annotations.push(self.format_identifier_annotation(
                     &tld.name,
@@ -750,14 +757,47 @@ impl Rasn {
                     &tld.ty,
                 ));
             }
-            Ok(choice_template(
+            let formatted_options = self.format_choice_options(choice, &name.to_string())?;
+            let choice_str = choice_template(
                 self.format_comments(&tld.comments)?,
-                name.clone(),
+                &name,
                 extensible,
-                self.format_choice_options(choice, &name.to_string())?,
-                inner_options,
+                formatted_options.enum_body,
+                formatted_options.nested_anonymous_types,
                 self.join_annotations(annotations),
-            ))
+            );
+            if self.config.generate_from_impls {
+                let mut map = BTreeMap::new();
+
+                let opts = choice
+                    .options
+                    .iter()
+                    .map(|o| {
+                        let (_, formatted_type_name) = self.constraints_and_type_name(
+                            &o.ty,
+                            &o.name,
+                            &name.to_string(),
+                            o.is_recursive,
+                        )?;
+
+                        let o_name = self.to_rust_enum_identifier(&o.name);
+                        map.entry(formatted_type_name.to_string())
+                            .and_modify(|counter| *counter += 1)
+                            .or_insert(1);
+                        Ok::<_, GeneratorError>((o_name, formatted_type_name))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                return Ok(std::iter::once(choice_str)
+                    .chain(opts.into_iter().filter_map(|(o_name, ty)| {
+                        if map[&ty.to_string()] > 1 {
+                            return None;
+                        }
+                        Some(choice_from_impl_template(&name, o_name, ty))
+                    }))
+                    .collect::<TokenStream>());
+            }
+            Ok(choice_str)
         } else {
             Err(GeneratorError::new(
                 Some(ToplevelDefinition::Type(tld)),
@@ -776,6 +816,10 @@ impl Rasn {
                 let name = self.to_rust_title_case(&tld.name);
                 let extensible = seq
                     .extensible
+                    .or(
+                        (self.extensibility_environment == ExtensibilityEnvironment::Implied)
+                            .then_some(seq.members.len()),
+                    )
                     .map(|_| {
                         quote! {
                         #[non_exhaustive]}
@@ -829,9 +873,16 @@ impl Rasn {
                         acc
                     })
                 };
-                let (declaration, name_types) =
+                let formatted_members =
                     self.format_sequence_or_set_members(seq, &name.to_string())?;
-                let mut annotations = vec![set_annotation, self.format_tag(tld.tag.as_ref(), true)];
+                let mut annotations = vec![
+                    set_annotation,
+                    self.format_tag(
+                        tld.tag.as_ref(),
+                        self.tagging_environment == TaggingEnvironment::Automatic
+                            && !seq.members.iter().any(|m| m.tag.is_some()),
+                    ),
+                ];
                 if name.to_string() != tld.name {
                     annotations.push(self.format_identifier_annotation(
                         &tld.name,
@@ -843,11 +894,11 @@ impl Rasn {
                     self.format_comments(&tld.comments)?,
                     name.clone(),
                     extensible,
-                    declaration,
-                    self.format_nested_sequence_members(seq, &name.to_string())?,
+                    formatted_members.struct_body,
+                    formatted_members.nested_anonymous_types,
                     self.join_annotations(annotations),
                     self.format_default_methods(&seq.members, &name.to_string())?,
-                    self.format_new_impl(&name, name_types),
+                    self.format_new_impl(&name, formatted_members.name_types),
                     class_fields,
                 ))
             }

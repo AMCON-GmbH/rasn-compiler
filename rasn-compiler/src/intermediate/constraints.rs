@@ -87,13 +87,13 @@ impl Constraint {
                 return Ok((min, max, *extensible));
             }
         }
-        Err(GrammarError {
-            details: format!(
+        Err(GrammarError::new(
+            &format!(
                 "Failed to unpack constraint as value range. Constraint: {:?}",
                 self
             ),
-            kind: GrammarErrorType::UnpackingError,
-        })
+            GrammarErrorType::UnpackingError,
+        ))
     }
 
     pub fn unpack_as_strict_value(&self) -> Result<(&ASN1Value, bool), GrammarError> {
@@ -106,13 +106,13 @@ impl Constraint {
                 return Ok((value, *extensible));
             }
         }
-        Err(GrammarError {
-            details: format!(
+        Err(GrammarError::new(
+            &format!(
                 "Failed to unpack constraint as strict value. Constraint: {:?}",
                 self
             ),
-            kind: GrammarErrorType::UnpackingError,
-        })
+            GrammarErrorType::UnpackingError,
+        ))
     }
 }
 
@@ -727,7 +727,7 @@ pub enum SubtypeElement {
     PermittedAlphabet(Box<ElementOrSetOperation>),
     SizeConstraint(Box<ElementOrSetOperation>),
     TypeConstraint(ASN1Type),
-    SingleTypeConstraint(InnerTypeConstraint),
+    SingleTypeConstraint(Vec<Constraint>),
     MultipleTypeConstraints(InnerTypeConstraint),
     PatternConstraint(PatternConstraint),
     UserDefinedConstraint(UserDefinedConstraint),
@@ -766,7 +766,7 @@ impl
             Vec<(&str, Option<Vec<Constraint>>, Option<ComponentPresence>)>,
         ),
     ) -> Self {
-        SubtypeElement::SingleTypeConstraint(InnerTypeConstraint {
+        SubtypeElement::MultipleTypeConstraints(InnerTypeConstraint {
             is_partial: value.0.is_some(),
             constraints: value
                 .1
