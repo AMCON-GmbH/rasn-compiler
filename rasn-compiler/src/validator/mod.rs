@@ -50,7 +50,7 @@ impl Validator {
 
     fn link(mut self) -> Result<(Self, Vec<CompilerError>), LinkerError> {
         let mut warnings: Vec<CompilerError> = vec![];
-        // Linking of ASN1 values depends on linked ASN1 types, so we order the key colelction accordingly (note that we pop keys)
+        // Linking of ASN1 values depends on linked ASN1 types, so we order the key collection accordingly (note that we pop keys)
         let mut keys = self
             .tlds
             .iter()
@@ -153,7 +153,7 @@ impl Validator {
                 self.tlds.insert(k, tld);
             }
             if let Some((k, mut tld)) = self.tlds.remove_entry(&key) {
-                if let Err(mut e) = tld.mark_recursive() {
+                if let Err(mut e) = tld.mark_recursive(&self.tlds) {
                     e.contextualize(&key);
                     warnings.push(e.into());
                 }
@@ -163,7 +163,7 @@ impl Validator {
                 .tlds
                 .get(&key)
                 .and_then(ToplevelDefinition::get_module_reference)
-                .map_or(false, |m| visited_headers.contains(&m.borrow().name).not())
+                .is_some_and(|m| visited_headers.contains(&m.borrow().name).not())
             {
                 self.fill_in_associated_type_imports(key, &mut visited_headers);
             }
@@ -334,7 +334,7 @@ impl Validator {
             .get(key)
             .map(|t| match t {
                 ToplevelDefinition::Type(t) => t.ty.references_class_by_name(),
-                ToplevelDefinition::Information(i) => i.class.as_ref().map_or(false, |c| match c {
+                ToplevelDefinition::Information(i) => i.class.as_ref().is_some_and(|c| match c {
                     ClassLink::ByReference(_) => false,
                     ClassLink::ByName(_) => true,
                 }),

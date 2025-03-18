@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{ops::Not, str::FromStr};
 
 use proc_macro2::{Ident, Literal, Punct, Spacing, Span, TokenStream};
 use quote::{format_ident, quote, ToTokens, TokenStreamExt};
@@ -249,30 +249,43 @@ impl Rasn {
         })
     }
 
-    pub(crate) fn format_enum_members(&self, enumerated: &Enumerated) -> TokenStream {
+    pub(crate) fn format_enum_members(
+        &self,
+        enumerated: &Enumerated,
+    ) -> Result<TokenStream, GeneratorError> {
         let first_extension_index = enumerated.extensible;
-        let enumerals = enumerated.members.iter().enumerate().map(|(i, e)| {
-            let name = self.to_rust_enum_identifier(&e.name);
-            let index = Literal::i128_unsuffixed(e.index);
-            let extension_annotation = if i >= first_extension_index.unwrap_or(usize::MAX) {
-                quote!(extension_addition)
-            } else {
-                TokenStream::new()
-            };
-            let identifier_annotation = if name != e.name {
-                let name = &e.name;
-                quote!(identifier = #name)
-            } else {
-                TokenStream::new()
-            };
-            let annotations =
-                self.join_annotations(vec![extension_annotation, identifier_annotation]);
-            quote!(
-                #annotations
-                #name = #index,
-            )
-        });
-        quote!(#(#enumerals)*)
+        let enumerals = enumerated
+            .members
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let name = self.to_rust_enum_identifier(&e.name);
+                let index = Literal::i128_unsuffixed(e.index);
+                let extension_annotation = if i >= first_extension_index.unwrap_or(usize::MAX) {
+                    quote!(extension_addition)
+                } else {
+                    TokenStream::new()
+                };
+                let identifier_annotation = if name != e.name {
+                    let name = &e.name;
+                    quote!(identifier = #name)
+                } else {
+                    TokenStream::new()
+                };
+                self.join_annotations(
+                    vec![extension_annotation, identifier_annotation],
+                    false,
+                    false,
+                )
+                .map(|annotations| {
+                    quote!(
+                        #annotations
+                        #name = #index,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(quote!(#(#enumerals)*))
     }
 
     pub(crate) fn format_tag(
@@ -310,7 +323,7 @@ impl Rasn {
         sequence_or_set.members.iter().enumerate().try_fold(
             FormattedMembers::default(),
             |mut acc, (i, m)| {
-                let nested = if self.needs_unnesting(&m.ty) {
+                let nested = if Self::needs_unnesting(&m.ty) {
                     Some(
                         self.generate_tld(ToplevelDefinition::Type(ToplevelTypeDefinition {
                             parameterization: None,
@@ -363,7 +376,16 @@ impl Rasn {
             parent_name,
             member.is_recursive,
         )?;
-        all_constraints.append(&mut member.constraints.clone());
+        if Self::needs_unnesting(&member.ty) {
+            formatted_type_name = self.inner_name(&member.name, parent_name).to_token_stream();
+            if member.is_recursive {
+                formatted_type_name = boxed_type(formatted_type_name);
+            }
+            // All constraints are applied on the delegate type
+            all_constraints = Vec::new();
+        } else {
+            all_constraints.append(&mut member.constraints.clone());
+        }
         if (member.is_optional && member.default_value.is_none())
             || member.name.starts_with("ext_group_")
         {
@@ -396,7 +418,7 @@ impl Rasn {
         if name != member.name || member.name.starts_with("ext_group_") {
             annotation_items.push(self.format_identifier_annotation(&member.name, "", &member.ty));
         }
-        let annotations = self.join_annotations(annotation_items);
+        let annotations = self.join_annotations(annotation_items, false, false)?;
         Ok((
             quote! {
                 #annotations
@@ -418,7 +440,7 @@ impl Rasn {
         choice.options.iter().enumerate().try_fold(
             FormattedOptions::default(),
             |mut acc, (i, o)| {
-                let nested = if self.needs_unnesting(&o.ty) {
+                let nested = if Self::needs_unnesting(&o.ty) {
                     Some(
                         self.generate_tld(ToplevelDefinition::Type(ToplevelTypeDefinition {
                             parameterization: None,
@@ -463,13 +485,22 @@ impl Rasn {
         parent_name: &String,
         extension_annotation: TokenStream,
     ) -> Result<TokenStream, GeneratorError> {
-        let (mut all_constraints, formatted_type_name) = self.constraints_and_type_name(
+        let (mut all_constraints, mut formatted_type_name) = self.constraints_and_type_name(
             &member.ty,
             &member.name,
             parent_name,
             member.is_recursive,
         )?;
-        all_constraints.append(&mut member.constraints.clone());
+        if Self::needs_unnesting(&member.ty) {
+            formatted_type_name = self.inner_name(&member.name, parent_name).to_token_stream();
+            if member.is_recursive {
+                formatted_type_name = boxed_type(formatted_type_name);
+            }
+            // All constraints are applied on the delegate type
+            all_constraints = Vec::new();
+        } else {
+            all_constraints.append(&mut member.constraints.clone());
+        }
         let range_annotations = self.format_range_annotations(
             matches!(member.ty, ASN1Type::Integer(_)),
             &all_constraints,
@@ -488,7 +519,7 @@ impl Rasn {
         if name != member.name || member.name.starts_with("ext_group_") {
             annotation_items.push(self.format_identifier_annotation(&member.name, "", &member.ty));
         }
-        let annotations = self.join_annotations(annotation_items);
+        let annotations = self.join_annotations(annotation_items, false, false)?;
         Ok(quote! {
                 #annotations
                 #name(#formatted_type_name),
@@ -600,9 +631,15 @@ impl Rasn {
         }
     }
 
-    pub(crate) fn join_annotations(&self, elements: Vec<TokenStream>) -> TokenStream {
+    pub(crate) fn join_annotations(
+        &self,
+        elements: Vec<TokenStream>,
+        needs_copy: bool,
+        is_type_annotation: bool,
+    ) -> Result<TokenStream, GeneratorError> {
         let mut not_empty_exprs = elements.into_iter().filter(|ts| !ts.is_empty());
-        if let Some(mut annotations) = not_empty_exprs.next() {
+        let custom_and_required = self.required_annotations(needs_copy)?;
+        let annotations = if let Some(mut annotations) = not_empty_exprs.next() {
             for elem in not_empty_exprs {
                 annotations.append(Punct::new(',', Spacing::Alone));
                 annotations.append_all(elem);
@@ -610,6 +647,11 @@ impl Rasn {
             quote!(#[rasn(#annotations)])
         } else {
             quote!()
+        };
+        if is_type_annotation {
+            Ok(quote!(#(#custom_and_required)* #annotations))
+        } else {
+            Ok(annotations)
         }
     }
 
@@ -882,7 +924,7 @@ impl Rasn {
         }
     }
 
-    pub(crate) fn needs_unnesting(&self, ty: &ASN1Type) -> bool {
+    pub(crate) fn needs_unnesting(ty: &ASN1Type) -> bool {
         match ty {
             ASN1Type::Enumerated(_)
             | ASN1Type::Choice(_)
@@ -890,7 +932,10 @@ impl Rasn {
             | ASN1Type::Set(_) => true,
             ASN1Type::SequenceOf(SequenceOrSetOf { element_type, .. })
             | ASN1Type::SetOf(SequenceOrSetOf { element_type, .. }) => {
-                self.needs_unnesting(element_type)
+                Self::needs_unnesting(element_type)
+                    || element_type
+                        .constraints()
+                        .is_some_and(|c| c.is_empty().not())
             }
             _ => false,
         }
@@ -1020,6 +1065,9 @@ impl Rasn {
         }
     }
 
+    const REQUIRED_DERIVES: [&'static str; 6] =
+        ["Debug", "AsnType", "Encode", "Decode", "PartialEq", "Clone"];
+    const COPY_DERIVE: &str = "Copy";
     const RUST_KEYWORDS: [&'static str; 53] = [
         "as",
         "break",
@@ -1084,7 +1132,7 @@ impl Rasn {
         while let Some(c) = peekable.next() {
             if c.is_lowercase() || c == '_' || c.is_numeric() {
                 lowercase.push(c);
-                if peekable.peek().map_or(false, |next| next.is_uppercase()) {
+                if c != '_' && peekable.peek().map_or(false, |next| next.is_uppercase()) {
                     lowercase.push('_');
                 }
             } else {
@@ -1119,10 +1167,7 @@ impl Rasn {
         let input = input.drain(..).fold(String::new(), |mut acc, c| {
             if acc.is_empty() && c.is_lowercase() {
                 acc.push(c.to_ascii_uppercase());
-            } else if acc.ends_with(|last: char| last == '_') && c.is_uppercase() {
-                acc.pop();
-                acc.push(c);
-            } else if acc.ends_with(|last: char| last == '_') {
+            } else if acc.ends_with('_') {
                 acc.pop();
                 acc.push(c.to_ascii_uppercase());
             } else {
@@ -1136,6 +1181,55 @@ impl Rasn {
             input
         };
         TokenStream::from_str(&name).unwrap()
+    }
+
+    fn required_annotations(&self, needs_copy: bool) -> Result<Vec<TokenStream>, GeneratorError> {
+        let mut required_derives = Vec::new();
+        for derive in Self::REQUIRED_DERIVES {
+            if !self.derive_is_present(derive)? {
+                required_derives.push(derive)
+            }
+        }
+        if needs_copy && !self.derive_is_present(Self::COPY_DERIVE)? {
+            required_derives.push(Self::COPY_DERIVE);
+        }
+        let mut custom_annotations = self
+            .config
+            .type_annotations
+            .iter()
+            .map(|s| TokenStream::from_str(s))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| GeneratorError {
+                details: e.to_string(),
+                ..Default::default()
+            })?;
+        if !required_derives.is_empty() {
+            let derives = required_derives
+                .into_iter()
+                .map(TokenStream::from_str)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| GeneratorError {
+                    details: e.to_string(),
+                    ..Default::default()
+                })?;
+            custom_annotations.push(quote!(#[derive(#(#derives),*)]));
+        };
+        Ok(custom_annotations)
+    }
+
+    fn derive_is_present(&self, annotation: &str) -> Result<bool, GeneratorError> {
+        let regex = regex::Regex::from_str(&format!(
+            r#"#\[derive\([0-z \t,]*{annotation}[0-z \t,]*\)\]"#
+        ))
+        .map_err(|e| GeneratorError {
+            details: e.to_string(),
+            ..Default::default()
+        })?;
+        Ok(self
+            .config
+            .type_annotations
+            .iter()
+            .any(|s| regex.is_match(s)))
     }
 }
 
@@ -1216,6 +1310,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn checks_derive_presence() {
+        let rasn = Rasn::new(
+            Config {
+                type_annotations: vec![String::from("#[derive(Test  , AsnType, Hello , World)]")],
+                ..Default::default()
+            },
+            TaggingEnvironment::Automatic,
+            ExtensibilityEnvironment::Explicit,
+        );
+        assert!(!rasn.derive_is_present("NotPresent").unwrap());
+        assert!(rasn.derive_is_present("AsnType").unwrap());
+    }
+
+    #[test]
     fn determines_int_type() {
         let generator = Rasn::default();
         assert_eq!(generator.int_type_token(Some(600), Some(600), false), "u16");
@@ -1238,17 +1346,22 @@ mod tests {
 
         assert_eq_ignore_ws!(
             generator
-                .join_annotations(vec![
-                    quote!(delegate),
-                    generator.format_tag(
-                        Some(&AsnTag {
-                            tag_class: crate::intermediate::TagClass::Application,
-                            environment: crate::intermediate::TaggingEnvironment::Explicit,
-                            id: 3,
-                        }),
-                        false,
-                    ),
-                ])
+                .join_annotations(
+                    vec![
+                        quote!(delegate),
+                        generator.format_tag(
+                            Some(&AsnTag {
+                                tag_class: crate::intermediate::TagClass::Application,
+                                environment: crate::intermediate::TaggingEnvironment::Explicit,
+                                id: 3,
+                            }),
+                            false,
+                        ),
+                    ],
+                    false,
+                    false
+                )
+                .unwrap()
                 .to_string(),
             "#[rasn(delegate, tag(explicit(application, 3)))]"
         )
@@ -1340,6 +1453,7 @@ mod tests {
                     extensible: Some(2),
                     constraints: vec![]
                 })
+                .unwrap()
                 .to_string(),
             r#"
             #[rasn(identifier="test-option-1")]
@@ -1478,7 +1592,7 @@ is_recursive: false,
         assert_eq!(generator.to_rust_snake_case("hello-world"), "hello_world");
         assert_eq!(generator.to_rust_snake_case("HELLOWORLD"), "helloworld");
         assert_eq!(generator.to_rust_snake_case("HelloWORLD"), "hello_world");
-        assert_eq!(generator.to_rust_snake_case("HELLO-WORLD"), "hello__world");
+        assert_eq!(generator.to_rust_snake_case("HELLO-WORLD"), "hello_world");
         assert_eq!(generator.to_rust_snake_case("struct"), "r_struct");
         assert_eq!(generator.to_rust_snake_case("STRUCT"), "r_struct");
     }

@@ -207,10 +207,8 @@ e2e_pdu!(
         #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #[rasn(choice, automatic_tags)]
         pub enum TFCSReconfAddR12CtfcSize {
-            #[rasn(size("1..=1024"))]
-            ctfc8Bit(SequenceOf<TFCSReconfAddR12CtfcSizeCtfc8Bit>),
-            #[rasn(size("1..=1024"))]
-            ctfc16Bit(SequenceOf<TFCSReconfAddR12CtfcSizeCtfc16Bit>),
+            ctfc8Bit(TFCSReconfAddR12CtfcSizeCtfc8Bit),
+            ctfc16Bit(TFCSReconfAddR12CtfcSizeCtfc16Bit),
         }
         #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
         #[rasn(automatic_tags, identifier = "TFCS-ReconfAdd-r12")]
@@ -323,6 +321,269 @@ e2e_pdu!(
             pub fn new(parameters: TestParameters) -> Self {
                 Self { parameters }
             }
+        }
+    "#
+);
+
+e2e_pdu!(
+    anonymous_sequence_of_item_in_sequence_member,
+    r#"
+    Ticket ::= SEQUENCE {
+        ages		SEQUENCE OF INTEGER (1..5),	 
+        passenger	Passenger OPTIONAL
+    }
+
+    Passenger ::= ENUMERATED {
+        adult	(0),
+        youth	(1),
+        ...
+    }
+    "#,
+    r#"
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash, Copy)]
+        #[rasn(enumerated)]
+        #[non_exhaustive]
+        pub enum Passenger{
+            adult = 0,
+            youth = 1,
+        }
+
+        #[doc = " Anonymous SEQUENCE OF member "]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(delegate, value("1..=5"), identifier = "INTEGER")]
+        pub struct AnonymousTicketAges(pub u8);
+
+        #[doc = " Inner type "]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(delegate)]
+        pub struct TicketAges(pub SequenceOf<AnonymousTicketAges>);
+
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(automatic_tags)]
+        pub struct Ticket {
+            pub ages: TicketAges,
+            pub passenger: Option<Passenger>,
+        }
+
+        impl Ticket {
+            pub fn new(ages: TicketAges, passenger: Option<Passenger>) -> Self {
+                Self { ages, passenger }
+            }
+        }
+    "#
+);
+
+e2e_pdu!(
+    anonymous_set_of_item_in_choice_option,
+    r#"
+    Ticket ::= CHOICE {
+        age-set		SET (SIZE (1..4)) OF INTEGER (1..5)
+    }
+    "#,
+    r#"
+        #[doc = " Anonymous SET OF member "]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(delegate, value("1..=5"), identifier = "INTEGER")]
+        pub struct AnonymousTicketAgeSet(pub u8);
+
+        #[doc = " Inner type "]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(delegate, size("1..=4"))]
+        pub struct TicketAgeSet(pub SetOf<AnonymousTicketAgeSet>);
+
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(choice, automatic_tags)]
+        pub enum Ticket {
+            #[rasn(identifier = "age-set")]
+            age_set(TicketAgeSet),
+        }
+    "#
+);
+
+e2e_pdu!(
+    nested_recursion,
+    r#"
+        TypeDescription ::= CHOICE {
+            boolean [0] IMPLICIT BOOLEAN,
+            string [2] IMPLICIT UTF8String,
+            array [3] IMPLICIT SEQUENCE {
+                size [0] IMPLICIT INTEGER (0..MAX),
+                element-type [1] TypeDescription
+            }
+        }
+    "#,
+    r#"
+        #[doc = " Inner type "]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(tag(context, 3))]
+        pub struct TypeDescriptionArray {
+            #[rasn(value("0.."), tag(context, 0))]
+            pub size: Integer,
+            #[rasn(tag(context, 1), identifier = "element-type")]
+            pub element_type: TypeDescription,
+        }
+        impl TypeDescriptionArray {
+            pub fn new(size: Integer, element_type: TypeDescription) -> Self {
+                Self { size, element_type }
+            }
+        }
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(choice)]
+        pub enum TypeDescription {
+            #[rasn(tag(context, 0))]
+            boolean(bool),
+            #[rasn(tag(context, 2))]
+            string(Utf8String),
+            #[rasn(tag(context, 3))]
+            array(Box<TypeDescriptionArray>),
+        }
+    "#
+);
+
+e2e_pdu!(
+    nested_recursion_elsewhere,
+    r#"
+        TypeSpecification ::= CHOICE {
+            array			[1] IMPLICIT SEQUENCE
+            {
+                elementType		[2] TypeSpecification
+            }
+        }
+
+        GetVariableAccessAttributesResponse ::= SEQUENCE
+        {
+            typeSpecification	[2] TypeSpecification
+        }
+    "#,
+    r#"
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        pub struct GetVariableAccessAttributesResponse {
+            #[rasn(tag(context, 2), identifier = "typeSpecification")]
+            pub type_specification: TypeSpecification,
+        }
+        impl GetVariableAccessAttributesResponse {
+            pub fn new(type_specification: TypeSpecification) -> Self {
+                Self { type_specification }
+            }
+        }
+        #[doc = " Inner type "]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(tag(context, 1))]
+        pub struct TypeSpecificationArray {
+            #[rasn(tag(context, 2), identifier = "elementType")]
+            pub element_type: TypeSpecification,
+        }
+        impl TypeSpecificationArray {
+            pub fn new(element_type: TypeSpecification) -> Self {
+                Self { element_type }
+            }
+        }
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(choice)]
+        pub enum TypeSpecification {
+            #[rasn(tag(context, 1))]
+            array(Box<TypeSpecificationArray>),
+        }
+    "#
+);
+
+e2e_pdu!(
+    nested_recursion_ping_pong,
+    r#"
+    TypeDescription ::= CHOICE {
+        array [1] IMPLICIT SEQUENCE {
+            elementType [2] TypeSpecification
+        },
+        structure [2] IMPLICIT SEQUENCE {
+            components [1] IMPLICIT SEQUENCE OF SEQUENCE {
+                componentType [1] TypeSpecification
+            }
+        }
+    }
+
+    TypeSpecification ::= CHOICE {
+        typeDescription TypeDescription
+    }
+
+    VariableSpecification ::= CHOICE {
+        variableDescription [2] IMPLICIT SEQUENCE {
+            typeSpecification TypeSpecification
+        }
+    }
+    "#,
+    r#"
+        #[doc = " Inner type "]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(tag(context, 1))]
+        pub struct TypeDescriptionArray {
+            #[rasn(tag(context, 2), identifier = "elementType")]
+            pub element_type: TypeSpecification,
+        }
+        impl TypeDescriptionArray {
+            pub fn new(element_type: TypeSpecification) -> Self {
+                Self { element_type }
+            }
+        }
+        #[doc = " Anonymous SEQUENCE OF member "]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(identifier = "SEQUENCE")]
+        pub struct AnonymousTypeDescriptionStructureComponents {
+            #[rasn(tag(context, 1), identifier = "componentType")]
+            pub component_type: TypeSpecification,
+        }
+        impl AnonymousTypeDescriptionStructureComponents {
+            pub fn new(component_type: TypeSpecification) -> Self {
+                Self { component_type }
+            }
+        }
+        #[doc = " Inner type "]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(delegate, tag(context, 1))]
+        pub struct TypeDescriptionStructureComponents(
+            pub SequenceOf<AnonymousTypeDescriptionStructureComponents>,
+        );
+        #[doc = " Inner type "]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(tag(context, 2))]
+        pub struct TypeDescriptionStructure {
+            #[rasn(tag(context, 1))]
+            pub components: TypeDescriptionStructureComponents,
+        }
+        impl TypeDescriptionStructure {
+            pub fn new(components: TypeDescriptionStructureComponents) -> Self {
+                Self { components }
+            }
+        }
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(choice)]
+        pub enum TypeDescription {
+            #[rasn(tag(context, 1))]
+            array(TypeDescriptionArray),
+            #[rasn(tag(context, 2))]
+            structure(TypeDescriptionStructure),
+        }
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(choice, automatic_tags)]
+        pub enum TypeSpecification {
+            typeDescription(Box<TypeDescription>),
+        }
+        #[doc = " Inner type "]
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(tag(context, 2))]
+        pub struct VariableSpecificationVariableDescription {
+            #[rasn(identifier = "typeSpecification")]
+            pub type_specification: TypeSpecification,
+        }
+        impl VariableSpecificationVariableDescription {
+            pub fn new(type_specification: TypeSpecification) -> Self {
+                Self { type_specification }
+            }
+        }
+        #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+        #[rasn(choice)]
+        pub enum VariableSpecification {
+            #[rasn(tag(context, 2))]
+            variableDescription(VariableSpecificationVariableDescription),
         }
     "#
 );
