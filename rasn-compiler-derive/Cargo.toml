@@ -3,6 +3,7 @@ name = "rasn-compiler-derive"
 workspace = ".."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 license.workspace = true
@@ -16,6 +17,6 @@ authors = ["Kevin Westphal"]
 proc-macro = true
 
 [dependencies]
-rasn-compiler = { path = "../rasn-compiler", version = "0.9.0" }
+rasn-compiler = { path = "../rasn-compiler", version = "0.11.0" }
 proc-macro2 = "1"
 syn= "2"

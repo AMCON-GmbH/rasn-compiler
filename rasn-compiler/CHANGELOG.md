@@ -6,6 +6,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/librasn/compiler/compare/rasn-compiler-v0.10.3...rasn-compiler-v0.11.0) - 2025-06-24
+
+### Added
+
+- *(lexer)* Support skipping over MACROs
+- *(lexer)* Handle escaped `"` in character string value
+
+### Fixed
+
+- remove tags on anonymous types
+
+## [0.10.3](https://github.com/librasn/compiler/compare/rasn-compiler-v0.10.2...rasn-compiler-v0.10.3) - 2025-06-14
+
+### Fixed
+
+- Backend selection was flipped
+
+## [0.10.2](https://github.com/librasn/compiler/compare/rasn-compiler-v0.10.1...rasn-compiler-v0.10.2) - 2025-06-11
+
+### Added
+
+- feat(cli) Set non-zero exit code on error
+- *(cli)* prefix output with colored severity
+- *(cli)* report walk dir errors
+- *(cli)* move -d and -m to required group
+
+### Other
+
+- Set MSRV
+
+## [0.10.1](https://github.com/librasn/compiler/compare/rasn-compiler-v0.10.0...rasn-compiler-v0.10.1) - 2025-05-22
+
+### Other
+
+- Merge pull request #107 from librasn/refactor/dry
+- VisibleString range endpoints are inclusive
+- Fixes multiples character subset parsing, like: VisibleString(FROM ("a".."z" | "A".."Z" | "0".."9" | ".-"))
+
+## [0.10.0](https://github.com/librasn/compiler/compare/rasn-compiler-v0.9.0...rasn-compiler-v0.10.0) - 2025-05-16
+
+### Added
+
+- add support for tagged sequence of items
+
+### Other
+
+- update dependencies
+
 ## [0.9.0](https://github.com/librasn/compiler/compare/rasn-compiler-v0.8.1...rasn-compiler-v0.9.0) - 2025-03-14
 
 ### Fixed

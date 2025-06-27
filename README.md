@@ -26,29 +26,27 @@ In order to compile ASN.1 in your build process, invoke the `rasn-compiler` in y
 use std::path::PathBuf;
 use rasn_compiler::prelude::*;
 
-fn main() {
-    // Initialize the compiler with the rust/rasn backend.
-    // To use the typescript backend, initialize the compiler using
-    // `Compiler::<TypescriptBackend, _>::new()`
-    match Compiler::<RasnBackend, _>::new()
-        // add a single ASN1 source file
-        .add_asn_by_path(PathBuf::from("spec_1.asn"))
-        // add several ASN1 source files
-        .add_asn_sources_by_path(vec![
-            PathBuf::from("spec_2.asn"),
-            PathBuf::from("spec_3.asn"),
-        ].iter())
-        // set an output path for the generated rust code
-        .set_output_path(PathBuf::from("./asn/generated.rs"))
-        // you may also compile literal ASN1 snippets
-        .add_asn_literal(format!(
-            "TestModule DEFINITIONS AUTOMATIC TAGS::= BEGIN {} END",
-            "My-test-integer ::= INTEGER (1..128)"
-        ))
-        .compile() {
-        Ok(warnings /* Vec<Box<dyn Error>> */) => { /* handle compilation warnings */ }
-        Err(error /* Box<dyn Error> */) => { /* handle unrecoverable compilation error */ }
-    }
+// Initialize the compiler with the rust/rasn backend.
+// To use the typescript backend, initialize the compiler using
+// `Compiler::<TypescriptBackend, _>::new()`
+match Compiler::<RasnBackend, _>::new()
+    // add a single ASN1 source file
+    .add_asn_by_path(PathBuf::from("spec_1.asn"))
+    // add several ASN1 source files
+    .add_asn_sources_by_path(vec![
+        PathBuf::from("spec_2.asn"),
+        PathBuf::from("spec_3.asn"),
+    ].iter())
+    // set an output path for the generated rust code
+    .set_output_path(PathBuf::from("./asn/generated.rs"))
+    // you may also compile literal ASN1 snippets
+    .add_asn_literal(format!(
+        "TestModule DEFINITIONS AUTOMATIC TAGS::= BEGIN {} END",
+        "My-test-integer ::= INTEGER (1..128)"
+    ))
+    .compile() {
+    Ok(warnings /* Vec<Box<dyn Error>> */) => { /* handle compilation warnings */ }
+    Err(error /* Box<dyn Error> */) => { /* handle unrecoverable compilation error */ }
 }
 ```
 
@@ -131,27 +129,25 @@ impl Backend for CustomBackend {
     }
 }
 
-fn main() {
-    // Initialize the compiler
-    match Compiler::<CustomBackend, _>::new()
-        // add a single ASN1 source file
-        .add_asn_by_path(PathBuf::from("spec_1.asn"))
-        // add several ASN1 source files
-        .add_asn_sources_by_path(vec![
-            PathBuf::from("spec_2.asn"),
-            PathBuf::from("spec_3.asn"),
-        ].iter())
-        // set an output path for the generated rust code
-        .set_output_path(PathBuf::from("./asn/generated.rs"))
-        // you may also compile literal ASN1 snippets
-        .add_asn_literal(format!(
-            "TestModule DEFINITIONS AUTOMATIC TAGS::= BEGIN {} END",
-            "My-test-integer ::= INTEGER (1..128)"
-        ))
-        .compile() {
-        Ok(warnings /* Vec<Box<dyn Error>> */) => { /* handle compilation warnings */ }
-        Err(error /* Box<dyn Error> */) => { /* handle unrecoverable compilation error */ }
-    }
+// Initialize the compiler
+match Compiler::<CustomBackend, _>::new()
+    // add a single ASN1 source file
+    .add_asn_by_path(PathBuf::from("spec_1.asn"))
+    // add several ASN1 source files
+    .add_asn_sources_by_path(vec![
+        PathBuf::from("spec_2.asn"),
+        PathBuf::from("spec_3.asn"),
+    ].iter())
+    // set an output path for the generated rust code
+    .set_output_path(PathBuf::from("./asn/generated.rs"))
+    // you may also compile literal ASN1 snippets
+    .add_asn_literal(format!(
+        "TestModule DEFINITIONS AUTOMATIC TAGS::= BEGIN {} END",
+        "My-test-integer ::= INTEGER (1..128)"
+    ))
+    .compile() {
+    Ok(warnings /* Vec<Box<dyn Error>> */) => { /* handle compilation warnings */ }
+    Err(error /* Box<dyn Error> */) => { /* handle unrecoverable compilation error */ }
 }
 ```
 
@@ -181,7 +177,7 @@ Currently, `rasn` supports the following encoding rules:
 
 -   `NULL` type and value
 -   `BOOLEAN` type and value
--   `REAL` type and value
+-   `REAL` type and value (de-/encoding support for XER, JER, and OER only)
 -   `NumericString` type and value
 -   `VisibleString` type and value
 -   `IA5String` type and value

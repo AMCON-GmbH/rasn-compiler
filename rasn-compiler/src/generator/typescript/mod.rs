@@ -19,7 +19,7 @@ pub struct Typescript {
 }
 
 #[derive(Debug, Default)]
-/// A configuration for the [Rasn] backend
+/// A configuration for the [Typescript] backend
 pub struct Config {}
 
 impl Backend for Typescript {
@@ -140,6 +140,11 @@ impl Backend for Typescript {
                 }
             }
             ToplevelDefinition::Value(v) => self.generate_value(v),
+            ToplevelDefinition::Macro(_) => Err(GeneratorError {
+                kind: GeneratorErrorType::NotYetInplemented,
+                details: "MACROs are currently unsupported!".to_string(),
+                top_level_declaration: Some(tld),
+            }),
             _ => Ok(String::new()),
         }
     }

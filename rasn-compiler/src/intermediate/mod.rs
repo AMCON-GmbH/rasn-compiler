@@ -10,6 +10,7 @@ pub mod constraints;
 pub mod encoding_rules;
 pub mod error;
 pub mod information_object;
+pub mod macros;
 pub mod parameterization;
 pub mod types;
 pub mod utils;
@@ -22,9 +23,13 @@ use error::{GrammarError, GrammarErrorType};
 use information_object::{InformationObjectFieldReference, ToplevelInformationDefinition};
 #[cfg(test)]
 use internal_macros::EnumDebug;
+use macros::ToplevelMacroDefinition;
 use parameterization::Parameterization;
 use quote::{quote, ToTokens, TokenStreamExt};
 use types::*;
+
+#[cfg(doc)]
+use crate::Backend;
 
 // Comment tokens
 pub const BLOCK_COMMENT_START: &str = "/*";
@@ -129,6 +134,9 @@ pub const GREATER_THAN: char = '>';
 pub const PIPE: &str = "|";
 pub const CARET: &str = "^";
 
+// Macro tokens
+pub const MACRO: &str = "MACRO";
+
 pub const ASSIGN: &str = "::=";
 pub const RANGE: &str = "..";
 pub const ELLIPSIS: &str = "...";
@@ -159,7 +167,7 @@ pub const TIME_OF_DAY: &str = "TIME-OF-DAY";
 pub const TYPE_IDENTIFIER: &str = "TYPE-IDENTIFIER";
 pub const ENCODING_CONTROL: &str = "ENCODING-CONTROL";
 
-pub const ASN1_KEYWORDS: [&str; 63] = [
+pub const ASN1_KEYWORDS: [&str; 64] = [
     ABSTRACT_SYNTAX,
     BIT,
     CHARACTER,
@@ -223,6 +231,7 @@ pub const ASN1_KEYWORDS: [&str; 63] = [
     FROM,
     INSTRUCTIONS,
     TAGS,
+    MACRO,
 ];
 
 macro_rules! grammar_error {
@@ -504,9 +513,6 @@ impl From<(&str, u128)> for ObjectIdentifierArc {
 
 /// Represents a top-level ASN.1 definition.
 /// The compiler distinguished three different variants of top-level definitions.
-/// * `Type` definitions define custom types based on ASN.1's built-in types
-/// * `Value` definitions define values using custom ot built-in types
-/// * `Information` definitions define abstraction concepts introduced in ITU-T X.681
 ///
 /// The linker and any [Backend] for this compiler consumes top-level definitions in
 /// order to generate bindings.
@@ -514,9 +520,14 @@ impl From<(&str, u128)> for ObjectIdentifierArc {
 #[cfg_attr(not(test), derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub enum ToplevelDefinition {
+    /// Definition for a custom type based on ASN.1's built-in type.
     Type(ToplevelTypeDefinition),
+    /// Definition for a value using custom or built-in type.
     Value(ToplevelValueDefinition),
+    /// Definition for an abstraction concept introduced in ITU-T X.681.
     Information(ToplevelInformationDefinition),
+    /// Definition for a macro.
+    Macro(ToplevelMacroDefinition),
 }
 
 impl ToplevelDefinition {
@@ -551,6 +562,9 @@ impl ToplevelDefinition {
             ToplevelDefinition::Information(ref mut i) => {
                 i.index = Some((module_reference, item_no));
             }
+            ToplevelDefinition::Macro(ref mut m) => {
+                m.index = Some((module_reference, item_no));
+            }
         }
     }
 
@@ -559,6 +573,7 @@ impl ToplevelDefinition {
             ToplevelDefinition::Type(ref t) => t.index.as_ref(),
             ToplevelDefinition::Value(ref v) => v.index.as_ref(),
             ToplevelDefinition::Information(ref i) => i.index.as_ref(),
+            ToplevelDefinition::Macro(ref m) => m.index.as_ref(),
         }
     }
 
@@ -567,6 +582,7 @@ impl ToplevelDefinition {
             ToplevelDefinition::Type(ref t) => t.index.as_ref().map(|(m, _)| m.clone()),
             ToplevelDefinition::Value(ref v) => v.index.as_ref().map(|(m, _)| m.clone()),
             ToplevelDefinition::Information(ref i) => i.index.as_ref().map(|(m, _)| m.clone()),
+            ToplevelDefinition::Macro(ref m) => m.index.as_ref().map(|(m, _)| m.clone()),
         }
     }
 
@@ -623,6 +639,7 @@ impl ToplevelDefinition {
             ToplevelDefinition::Information(i) => &i.name,
             ToplevelDefinition::Type(t) => &t.name,
             ToplevelDefinition::Value(v) => &v.name,
+            ToplevelDefinition::Macro(v) => &v.name,
         }
     }
 }

@@ -6,7 +6,10 @@ use nom::{
     sequence::{terminated, tuple},
 };
 
-use crate::intermediate::{types::*, *};
+use crate::{
+    common::INTERNAL_EXTENSION_GROUP_NAME_PREFIX,
+    intermediate::{types::*, *},
+};
 
 use super::{common::optional_comma, constraint::constraint, *};
 
@@ -86,7 +89,8 @@ fn extension_group(input: Input<'_>) -> ParserResult<'_, SequenceComponent> {
             }
             SequenceComponent::Member(SequenceOrSetMember {
                 is_recursive: false,
-                name: String::from("ext_group_") + &members.first().unwrap().name,
+                name: String::from(INTERNAL_EXTENSION_GROUP_NAME_PREFIX)
+                    + &members.first().unwrap().name,
                 tag: None,
                 ty: ASN1Type::Sequence(SequenceOrSet {
                     components_of,
@@ -845,6 +849,7 @@ integrityCheckValue     ICV OPTIONAL
                     name: "ages".into(),
                     tag: None,
                     ty: ASN1Type::SequenceOf(SequenceOrSetOf {
+                        element_tag: None,
                         constraints: vec![],
                         element_type: Box::new(ASN1Type::Integer(Integer {
                             constraints: vec![Constraint::SubtypeConstraint(ElementSet {
@@ -864,6 +869,49 @@ integrityCheckValue     ICV OPTIONAL
                     is_recursive: false,
                     constraints: vec![],
                 }],
+            },)
+        )
+    }
+
+    #[test]
+    fn parses_prefixed_sequence_member() {
+        assert_eq!(
+            sequence(
+                r#"
+            SEQUENCE       
+            {
+                member SEQUENCE OF [0] INTEGER,
+            }
+        "#
+                .into()
+            )
+            .unwrap()
+            .1,
+            ASN1Type::Sequence(SequenceOrSet {
+                components_of: vec![],
+                extensible: None,
+                constraints: vec![],
+                members: vec![SequenceOrSetMember {
+                    name: "member".into(),
+                    tag: None,
+                    ty: ASN1Type::SequenceOf(SequenceOrSetOf {
+                        constraints: vec![],
+                        element_type: Box::new(ASN1Type::Integer(Integer {
+                            constraints: vec![],
+                            distinguished_values: None,
+                        })),
+                        element_tag: Some(AsnTag {
+                            environment: TaggingEnvironment::Automatic,
+                            tag_class: TagClass::ContextSpecific,
+                            id: 0,
+                        },),
+                        is_recursive: false,
+                    },),
+                    default_value: None,
+                    is_optional: false,
+                    is_recursive: false,
+                    constraints: vec![],
+                },],
             },)
         )
     }
