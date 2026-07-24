@@ -36,7 +36,8 @@ macro_rules! grammar_error {
 impl ToplevelDefinition {
     pub(crate) fn is_parameterized(&self) -> bool {
         match self {
-            ToplevelDefinition::Information(ToplevelInformationDefinition {
+            ToplevelDefinition::Class(class) => class.is_parameterized(),
+            ToplevelDefinition::Object(ToplevelInformationDefinition {
                 parameterization: Some(_),
                 ..
             })
@@ -67,11 +68,11 @@ impl ToplevelDefinition {
             | ToplevelDefinition::Type(ToplevelTypeDefinition {
                 ty: ASN1Type::SetOf(s),
                 ..
-            }) => s.element_type.constraints().is_some_and(|constraints| {
-                constraints
-                    .iter()
-                    .any(|c| matches!(c, Constraint::Parameter(_)))
-            }),
+            }) => s
+                .element_type
+                .constraints()
+                .iter()
+                .any(|c| matches!(c, Constraint::Parameter(_))),
             _ => false,
         }
     }
@@ -104,12 +105,9 @@ impl ToplevelDefinition {
         None
     }
 
-    pub fn is_class_with_name(&self, name: &String) -> Option<&InformationObjectClass> {
+    pub fn is_class_with_name(&self, name: &String) -> Option<&ObjectClassDefn> {
         match self {
-            ToplevelDefinition::Information(info) => match &info.value {
-                ASN1Information::ObjectClass(class) => (&info.name == name).then_some(class),
-                _ => None,
-            },
+            ToplevelDefinition::Class(class) if &class.name == name => Some(&class.definition),
             _ => None,
         }
     }
@@ -209,9 +207,10 @@ impl ToplevelDefinition {
                 let _ = t.ty.mark_recursive(&t.name, tlds)?;
                 Ok(())
             }
-            ToplevelDefinition::Value(_v) => Ok(()), // TODO
-            ToplevelDefinition::Information(_i) => Ok(()), // TODO
-            ToplevelDefinition::Macro(_m) => Ok(()), // TODO
+            ToplevelDefinition::Value(_v) => Ok(()),  // TODO
+            ToplevelDefinition::Class(_c) => Ok(()),  // TODO
+            ToplevelDefinition::Object(_o) => Ok(()), // TODO
+            ToplevelDefinition::Macro(_m) => Ok(()),  // TODO
         }
     }
 
@@ -223,7 +222,8 @@ impl ToplevelDefinition {
         match self {
             ToplevelDefinition::Type(t) => t.ty.collect_supertypes(tlds),
             ToplevelDefinition::Value(v) => v.collect_supertypes(tlds),
-            ToplevelDefinition::Information(i) => i.collect_supertypes(tlds),
+            ToplevelDefinition::Class(_) => Ok(()),
+            ToplevelDefinition::Object(o) => o.collect_supertypes(tlds),
             ToplevelDefinition::Macro(_) => Ok(()),
         }
     }
@@ -267,8 +267,8 @@ impl ASN1Type {
             ASN1Type::Set(ref mut s) | ASN1Type::Sequence(ref mut s) => {
                 s.members.iter_mut().try_for_each(|m| {
                     m.ty.collect_supertypes(tlds)?;
-                    m.default_value
-                        .as_mut()
+                    m.optionality
+                        .default_mut()
                         .map(|d| d.link_with_type(tlds, &m.ty, Some(&m.ty.as_str().into_owned())))
                         .unwrap_or(Ok(()))
                 })
@@ -425,7 +425,7 @@ impl ASN1Type {
                     b.link_cross_reference(name, tlds)?;
                 }
                 if let Some(replacement) = s.element_type.link_constraint_reference(name, tlds)? {
-                    s.element_type = Box::new(replacement);
+                    *s.element_type = replacement;
                 }
             }
             ASN1Type::ElsewhereDeclaredType(e) => {
@@ -447,14 +447,10 @@ impl ASN1Type {
                     }
                 }
             }
-            ASN1Type::InformationObjectFieldReference(iofr) => {
-                if let Some(ToplevelDefinition::Information(ToplevelInformationDefinition {
-                    value: ASN1Information::ObjectClass(clazz),
-                    ..
-                })) = tlds.get(&iofr.class)
-                {
+            ASN1Type::ObjectClassField(ocf) => {
+                if let Some(ToplevelDefinition::Class(class)) = tlds.get(&ocf.class) {
                     if let Some(InformationObjectClassField { ty: Some(ty), .. }) =
-                        clazz.get_field(&iofr.field_path)
+                        class.definition.get_field(&ocf.field_path)
                     {
                         self_replacement = Some(ty.clone());
                     }
@@ -532,10 +528,8 @@ impl ASN1Type {
                                 c.as_str(),
                             ));
                             tld = tld.resolve_class_reference(tlds);
-                            impl_tlds.insert(
-                                dummy_reference.clone(),
-                                ToplevelDefinition::Information(tld),
-                            );
+                            impl_tlds
+                                .insert(dummy_reference.clone(), ToplevelDefinition::Object(tld));
                         }
                         _ => {
                             return Err(grammar_error!(
@@ -604,7 +598,7 @@ impl ASN1Type {
         &mut self,
         name: &str,
         tlds: &BTreeMap<String, ToplevelDefinition>,
-    ) -> Result<Vec<Cow<str>>, GrammarError> {
+    ) -> Result<Vec<Cow<'_, str>>, GrammarError> {
         match self {
             ASN1Type::Choice(choice) => {
                 let mut children = Vec::new();
@@ -640,9 +634,7 @@ impl ASN1Type {
                 LinkerError,
                 "Choice selection types should be resolved by now"
             )),
-            ASN1Type::InformationObjectFieldReference(_information_object_field_reference) => {
-                Ok(Vec::new())
-            } // TODO
+            ASN1Type::ObjectClassField(_object_class_field_type) => Ok(Vec::new()), // TODO
             n => Ok(vec![n.as_str()]),
         }
     }
@@ -676,7 +668,7 @@ impl ASN1Type {
                 for m in &mut s.members {
                     if let Some(constraints) = m.ty.constraints_mut() {
                         for c in constraints {
-                            if let Constraint::TableConstraint(TableConstraint {
+                            if let Constraint::Table(TableConstraint {
                                 object_set: ObjectSet { values, .. },
                                 ..
                             }) = c
@@ -732,13 +724,9 @@ impl ASN1Type {
                     ))
                 }
             }
-            ASN1Type::InformationObjectFieldReference(iofr) => {
-                if let Some(ToplevelDefinition::Information(ToplevelInformationDefinition {
-                    value: ASN1Information::ObjectClass(c),
-                    ..
-                })) = tlds.get(&iofr.class)
-                {
-                    if let Some(field) = c.get_field(&iofr.field_path) {
+            ASN1Type::ObjectClassField(ocf) => {
+                if let Some(ToplevelDefinition::Class(c)) = tlds.get(&ocf.class) {
+                    if let Some(field) = c.definition.get_field(&ocf.field_path) {
                         if let Some(ref ty) = field.ty {
                             *self = ty.clone();
                         }
@@ -748,8 +736,8 @@ impl ASN1Type {
                 Err(grammar_error!(
                     LinkerError,
                     "Failed to resolve argument {}.{} of parameterized implementation.",
-                    iofr.class,
-                    iofr.field_path
+                    ocf.class,
+                    ocf.field_path
                         .iter()
                         .map(|f| f.identifier().clone())
                         .collect::<Vec<_>>()
@@ -785,8 +773,8 @@ impl ASN1Type {
                 s.constraints.iter().any(|c| c.has_cross_reference())
                     || s.members.iter().any(|m| {
                         m.ty.contains_constraint_reference()
-                            || m.default_value
-                                .as_ref()
+                            || m.optionality
+                                .default()
                                 .is_some_and(|d| d.is_elsewhere_declared())
                             || m.constraints.iter().any(|c| c.has_cross_reference())
                     })
@@ -807,9 +795,9 @@ impl ASN1Type {
             ASN1Type::Choice(c) => c.options.iter().any(|o| o.ty.references_class_by_name()),
             ASN1Type::Sequence(s) => s.members.iter().any(|m| m.ty.references_class_by_name()),
             ASN1Type::SequenceOf(so) => so.element_type.references_class_by_name(),
-            ASN1Type::InformationObjectFieldReference(io_ref) => {
+            ASN1Type::ObjectClassField(ocf) => {
                 matches!(
-                    io_ref.field_path.last(),
+                    ocf.field_path.last(),
                     Some(ObjectFieldIdentifier::SingleValue(_))
                 )
             }
@@ -848,18 +836,18 @@ impl ASN1Type {
                     })
                     .collect(),
             }),
-            ASN1Type::InformationObjectFieldReference(_) => self.reassign_type_for_ref(tlds),
+            ASN1Type::ObjectClassField(_) => self.reassign_type_for_ref(tlds),
             _ => self,
         }
     }
 
     fn reassign_type_for_ref(mut self, tlds: &BTreeMap<String, ToplevelDefinition>) -> Self {
-        if let Self::InformationObjectFieldReference(ref ior) = self {
+        if let Self::ObjectClassField(ref ocf) = self {
             if let Some(t) = tlds
                 .iter()
                 .find_map(|(_, c)| {
-                    c.is_class_with_name(&ior.class)
-                        .map(|clazz| clazz.get_field(&ior.field_path))
+                    c.is_class_with_name(&ocf.class)
+                        .map(|clazz| clazz.get_field(&ocf.field_path))
                 })
                 .flatten()
                 .and_then(|class_field| class_field.ty.clone())
@@ -915,7 +903,11 @@ impl ASN1Value {
             }
             (
                 ASN1Type::ElsewhereDeclaredType(e),
-                ASN1Value::ElsewhereDeclaredValue { identifier, parent },
+                ASN1Value::ElsewhereDeclaredValue {
+                    module: _,
+                    identifier,
+                    parent,
+                },
             ) => {
                 if let Some(value) = Self::link_enum_or_distinguished(
                     tlds,
@@ -1023,6 +1015,37 @@ impl ASN1Value {
                     Ok(())
                 }
             }
+            (ASN1Type::SetOf(_), ASN1Value::ObjectIdentifier(val))
+            | (ASN1Type::SequenceOf(_), ASN1Value::ObjectIdentifier(val))
+            | (ASN1Type::Set(_), ASN1Value::ObjectIdentifier(val))
+            | (ASN1Type::Sequence(_), ASN1Value::ObjectIdentifier(val)) => {
+                // Object identifier values and sequence-like values cannot be properly distinguished
+                let mut pseudo_arcs = std::mem::take(&mut val.0);
+                let struct_value = pseudo_arcs
+                    .chunks_mut(2)
+                    .map(|chunk| {
+                        let err = || GrammarError {
+                            pdu: None,
+                            details:
+                                "Failed to interpret object identifier value as sequence value!"
+                                    .into(),
+                            kind: GrammarErrorType::LinkerError,
+                        };
+                        if let [id, val] = chunk {
+                            val.number
+                                .and_then(|n| <u128 as TryInto<i128>>::try_into(n).ok())
+                                .ok_or_else(err)
+                                .map(|number| {
+                                    (id.name.take(), Box::new(ASN1Value::Integer(number)))
+                                })
+                        } else {
+                            Err(err())
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                *self = ASN1Value::SequenceOrSet(struct_value);
+                self.link_with_type(tlds, ty, type_name)
+            }
             (ASN1Type::Set(s), ASN1Value::SequenceOrSet(val))
             | (ASN1Type::Sequence(s), ASN1Value::SequenceOrSet(val)) => {
                 *self = Self::link_struct_like(val, s, tlds, type_name)?;
@@ -1033,7 +1056,7 @@ impl ASN1Value {
                 if matches![**value, ASN1Value::SequenceOrSet(_)] =>
             {
                 if let ASN1Value::SequenceOrSet(val) = &mut **value {
-                    *value = Box::new(Self::link_struct_like(val, s, tlds, type_name)?);
+                    **value = Self::link_struct_like(val, s, tlds, type_name)?;
                 }
                 Ok(())
             }
@@ -1047,7 +1070,7 @@ impl ASN1Value {
                 if matches![**value, ASN1Value::SequenceOrSet(_)] =>
             {
                 if let ASN1Value::SequenceOrSet(val) = &mut **value {
-                    *value = Box::new(Self::link_array_like(val, s, tlds)?);
+                    **value = Self::link_array_like(val, s, tlds)?;
                 }
                 Ok(())
             }
@@ -1066,7 +1089,7 @@ impl ASN1Value {
                 if matches![**value, ASN1Value::String(_)] =>
             {
                 if let ASN1Value::String(s) = &**value {
-                    *value = Box::new(ASN1Value::LinkedCharStringValue(t.ty, s.clone()));
+                    **value = ASN1Value::LinkedCharStringValue(t.ty, s.clone());
                 }
                 Ok(())
             }
@@ -1104,7 +1127,7 @@ impl ASN1Value {
                 ASN1Value::LinkedNestedValue { value, .. },
             ) if matches![**value, ASN1Value::SequenceOrSet(_)] => {
                 if let ASN1Value::SequenceOrSet(o) = &**value {
-                    *value = Box::new(ASN1Value::BitStringNamedBits(
+                    **value = ASN1Value::BitStringNamedBits(
                         o.iter()
                             .filter_map(|(_, v)| match &**v {
                                 ASN1Value::ElsewhereDeclaredValue { identifier, .. } => {
@@ -1116,7 +1139,7 @@ impl ASN1Value {
                                 _ => None,
                             })
                             .collect(),
-                    ));
+                    );
                     self.link_with_type(tlds, ty, type_name)?;
                 }
                 Ok(())
@@ -1141,9 +1164,9 @@ impl ASN1Value {
                 ASN1Value::LinkedNestedValue { value, .. },
             ) if matches![**value, ASN1Value::ObjectIdentifier(_)] => {
                 if let ASN1Value::ObjectIdentifier(o) = &**value {
-                    *value = Box::new(ASN1Value::BitStringNamedBits(
+                    **value = ASN1Value::BitStringNamedBits(
                         o.0.iter().filter_map(|arc| arc.name.clone()).collect(),
-                    ));
+                    );
                     self.link_with_type(tlds, ty, type_name)?;
                 }
                 Ok(())
@@ -1181,11 +1204,11 @@ impl ASN1Value {
                 if let (ASN1Value::BitStringNamedBits(o), Some(highest_distinguished_bit)) =
                     (&**value, distinguished.iter().map(|d| d.value).max())
                 {
-                    *value = Box::new(ASN1Value::BitString(bit_string_value_from_named_bits(
+                    **value = ASN1Value::BitString(bit_string_value_from_named_bits(
                         highest_distinguished_bit,
                         o,
                         distinguished,
-                    )));
+                    ));
                     Ok(())
                 } else {
                     Err(GrammarError {
@@ -1199,7 +1222,7 @@ impl ASN1Value {
                 if matches![**value, ASN1Value::OctetString(_)] =>
             {
                 if let ASN1Value::OctetString(o) = &**value {
-                    *value = Box::new(ASN1Value::BitString(octet_string_to_bit_string(o)));
+                    **value = ASN1Value::BitString(octet_string_to_bit_string(o));
                 }
                 Ok(())
             }
@@ -1211,7 +1234,7 @@ impl ASN1Value {
                 if matches![**value, ASN1Value::BitString(_)] =>
             {
                 if let ASN1Value::BitString(b) = &**value {
-                    *value = Box::new(ASN1Value::OctetString(bit_string_to_octet_string(b)?));
+                    **value = ASN1Value::OctetString(bit_string_to_octet_string(b)?);
                 }
                 Ok(())
             }
@@ -1231,10 +1254,10 @@ impl ASN1Value {
                                 .find_map(|d| (&d.name == identifier).then_some(d.value))
                         })
                     {
-                        *value = Box::new(ASN1Value::LinkedIntValue {
+                        **value = ASN1Value::LinkedIntValue {
                             integer_type: i.int_type(),
                             value: distinguished_value,
-                        });
+                        };
                     }
                 }
                 Ok(())
@@ -1246,10 +1269,10 @@ impl ASN1Value {
                     let int_type = i.constraints.iter().fold(IntegerType::Unbounded, |acc, c| {
                         c.integer_constraints().max_restrictive(acc)
                     });
-                    *value = Box::new(ASN1Value::LinkedIntValue {
+                    **value = ASN1Value::LinkedIntValue {
                         integer_type: int_type,
                         value: *v,
-                    });
+                    };
                 }
                 Ok(())
             }
@@ -1274,10 +1297,10 @@ impl ASN1Value {
                         .iter()
                         .find(|(_, tld)| tld.has_enum_value(None, identifier))
                     {
-                        *value = Box::new(ASN1Value::EnumeratedValue {
+                        **value = ASN1Value::EnumeratedValue {
                             enumerated: tld.name().clone(),
                             enumerable: identifier.clone(),
-                        });
+                        };
                     }
                 }
                 Ok(())
@@ -1297,6 +1320,7 @@ impl ASN1Value {
             (
                 _,
                 ASN1Value::ElsewhereDeclaredValue {
+                    module: None,
                     parent: None,
                     identifier,
                 },
@@ -1430,8 +1454,8 @@ impl ASN1Value {
                             .then_some(StructLikeFieldValue::Explicit(value.clone()))
                     })
                     .or(member
-                        .default_value
-                        .as_ref()
+                        .optionality
+                        .default()
                         .map(|d| StructLikeFieldValue::Implicit(Box::new(d.clone()))))
                     .ok_or_else(|| {
                         grammar_error!(LinkerError, "No value for field {} found!", member.name)
@@ -1473,6 +1497,7 @@ impl ASN1Value {
         tlds: &BTreeMap<String, ToplevelDefinition>,
     ) -> Result<(), GrammarError> {
         if let Self::ElsewhereDeclaredValue {
+            module: None,
             parent: Some(object_name),
             identifier,
         } = self
@@ -1483,7 +1508,7 @@ impl ASN1Value {
             let object = get_declaration![
                 tlds,
                 object_name,
-                Information,
+                Object,
                 ASN1Information::Object
             ]
             .ok_or_else(|| grammar_error!(LinkerError, "No information object found for identifier {object_name}, parent of {identifier}"))?;
@@ -1502,19 +1527,19 @@ impl ASN1Value {
                 }
                 InformationObjectFields::CustomSyntax(c) => {
                     let class_name = &object.class_name;
-                    let class = get_declaration![
-                        tlds,
-                        class_name,
-                        Information,
-                        ASN1Information::ObjectClass
-                    ]
-                    .ok_or_else(|| {
-                        grammar_error!(
+                    let Some(tld) = tlds.get(class_name) else {
+                        return Err(grammar_error!(
                             LinkerError,
-                            "No information object class found for identifier {class_name}"
-                        )
-                    })?;
-                    let syntax = class.syntax.as_ref().ok_or_else(|| {
+                            "No top level definition found for identifier {class_name}"
+                        ));
+                    };
+                    let ToplevelDefinition::Class(class) = tld else {
+                        return Err(grammar_error!(
+                            LinkerError,
+                            "Identifier {class_name} is not a CLASS definition"
+                        ));
+                    };
+                    let syntax = class.definition.syntax.as_ref().ok_or_else(|| {
                         grammar_error!(LinkerError, "No syntax info found for class {class_name}")
                     })?;
                     let tokens = syntax.flatten();
@@ -1570,6 +1595,7 @@ impl ASN1Value {
                 return self.resolve_elsewhere_with_parent(tlds);
             }
             Self::ElsewhereDeclaredValue {
+                module: _,
                 identifier: e,
                 parent: _,
             }
@@ -1615,7 +1641,7 @@ mod tests {
             ToplevelTypeDefinition {
                 comments: String::new(),
                 tag: None,
-                index: None,
+                module_header: None,
                 name: $name.into(),
                 ty: $ty,
                 parameterization: None,
@@ -1642,6 +1668,7 @@ mod tests {
                     "IntermediateBool",
                     ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                         parent: None,
+                        module: None,
                         identifier: String::from("RootBool"),
                         constraints: vec![]
                     })
@@ -1661,6 +1688,7 @@ mod tests {
                             tag: None,
                             ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                                 parent: None,
+                                module: None,
                                 identifier: String::from("IntermediateBool"),
                                 constraints: vec![]
                             })
@@ -1676,10 +1704,11 @@ mod tests {
             parameterization: None,
             associated_type: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                 parent: None,
+                module: None,
                 identifier: "BaseChoice".into(),
                 constraints: vec![],
             }),
-            index: None,
+            module_header: None,
             value: ASN1Value::Choice {
                 type_name: None,
                 variant_name: "first".into(),
@@ -1694,6 +1723,7 @@ mod tests {
                 name: "exampleValue".into(),
                 associated_type: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                     parent: None,
+                    module: None,
                     identifier: "BaseChoice".into(),
                     constraints: vec![]
                 }),
@@ -1706,7 +1736,7 @@ mod tests {
                         value: Box::new(ASN1Value::Boolean(true))
                     })
                 },
-                index: None
+                module_header: None
             }
         )
     }

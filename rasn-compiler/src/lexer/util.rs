@@ -3,7 +3,7 @@ use std::{cmp::min, fmt::Debug};
 use nom::{
     bytes::complete::tag,
     error::{Error, ErrorKind, ParseError},
-    Err, FindSubstring, IResult, InputLength, InputTake, Parser, Slice,
+    Err, FindSubstring, IResult, Input as _, Offset, Parser,
 };
 
 use crate::input::Input;
@@ -11,26 +11,44 @@ use crate::input::Input;
 use super::error::{ErrorTree, ParserResult};
 
 #[allow(dead_code)]
-pub fn debug_result<'a, O, F>(mut parser: F) -> impl FnMut(Input<'a>) -> ParserResult<'a, O>
+pub fn debug_result<'a, F>(
+    mut parser: F,
+) -> impl Parser<Input<'a>, Output = F::Output, Error = F::Error>
 where
-    O: Debug,
-    F: FnMut(Input<'a>) -> ParserResult<'a, O>,
+    F: Parser<Input<'a>>,
+    F::Output: Debug,
+    F::Error: Debug,
 {
-    move |input| {
-        let result = parser(input);
-        println!("{result:#?}");
+    move |input: Input<'a>| {
+        let result = parser.parse(input.clone());
+        match &result {
+            Ok((rest, value)) => {
+                let bytes_matched = Offset::offset(&input, rest);
+                let matched = input.slice(..bytes_matched);
+                eprintln!("VALUE  : {value:#?}");
+                eprintln!("MATCHED: {:#?}", matched.inner());
+                eprintln!("REST   : {rest:?}");
+            }
+            Err(err) => {
+                eprintln!("ERROR  : {err:#?}");
+            }
+        }
         result
     }
 }
 
 pub fn until_next_unindented(input: &str, at_least_until: usize, fallback_len: usize) -> &str {
-    match regex::Regex::new("\n[A-Za-z0-9]")
-        .ok()
-        .and_then(|needle| needle.find(&input[at_least_until..]))
-    {
-        Some(m) => &input[..(m.start() + at_least_until)],
-        _ => input[..input.len().min(fallback_len)].trim(),
+    let mut prev_was_newline = false;
+    for (idx, ch) in input[at_least_until..].char_indices() {
+        if prev_was_newline && ch.is_ascii_alphanumeric() {
+            // Found "\n[A-Za-z0-9]" pattern, return up to the newline
+            return &input[..(idx - 1 + at_least_until)];
+        }
+        prev_was_newline = ch == '\n';
     }
+
+    // No match found, use fallback
+    input[..input.len().min(fallback_len)].trim()
 }
 
 pub fn hex_to_bools(c: char) -> [bool; 4] {
@@ -54,24 +72,24 @@ pub fn hex_to_bools(c: char) -> [bool; 4] {
     }
 }
 
-pub fn map_into<I, O1, O2, E, F>(mut parser: F) -> impl FnMut(I) -> IResult<I, O2, E>
+pub fn map_into<I, O, F>(mut parser: F) -> impl Parser<I, Output = O, Error = F::Error>
 where
-    F: Parser<I, O1, E>,
-    O1: Into<O2>,
+    F: Parser<I>,
+    F::Output: Into<O>,
 {
     move |input: I| {
-        let (input, o1) = parser.parse(input)?;
-        Ok((input, o1.into()))
+        let (input, o) = parser.parse(input)?;
+        Ok((input, o.into()))
     }
 }
 
 pub fn take_until_or<T, Input, Error: ParseError<Input>>(
     tag1: T,
     tag2: T,
-) -> impl Fn(Input) -> IResult<Input, Input, Error>
+) -> impl Parser<Input, Output = Input, Error = Error>
 where
-    Input: InputTake + FindSubstring<T>,
-    T: InputLength + Clone,
+    Input: nom::Input + FindSubstring<T>,
+    T: Clone,
 {
     move |i: Input| {
         let t1 = tag1.clone();
@@ -98,8 +116,8 @@ where
 pub fn take_until_and_not<'a>(
     end_tag: &'a str,
     however_tag: &'a str,
-) -> impl Fn(Input<'a>) -> ParserResult<'a, &'a str> {
-    move |i: Input<'_>| {
+) -> impl Parser<Input<'a>, Output = &'a str, Error = ErrorTree<'a>> {
+    move |i: Input<'a>| {
         fn recursive_until<'a>(
             i: Input<'a>,
             index: usize,
@@ -136,8 +154,8 @@ pub fn take_until_and_not<'a>(
 pub fn take_until_unbalanced<'a>(
     opening_tag: &'a str,
     closing_tag: &'a str,
-) -> impl Fn(Input<'a>) -> ParserResult<'a, &'a str> {
-    move |i: Input<'_>| {
+) -> impl Parser<Input<'a>, Output = &'a str, Error = ErrorTree<'a>> {
+    move |i: Input<'a>| {
         let mut index = 0;
         let mut bracket_counter = 0;
         'consume: loop {
@@ -175,16 +193,15 @@ pub fn take_until_unbalanced<'a>(
     }
 }
 
-pub fn opt_delimited<'a, O1, O2, O3, F, G, H>(
+pub fn opt_delimited<'a, F, G, H>(
     mut first: F,
     mut second: G,
     mut third: H,
-) -> impl FnMut(Input<'a>) -> ParserResult<'a, O2>
+) -> impl Parser<Input<'a>, Output = G::Output, Error = ErrorTree<'a>>
 where
-    F: Parser<Input<'a>, O1, ErrorTree<'a>>,
-    G: Parser<Input<'a>, O2, ErrorTree<'a>>,
-    H: Parser<Input<'a>, O3, ErrorTree<'a>>,
-    O1: std::fmt::Debug,
+    F: Parser<Input<'a>, Error = ErrorTree<'a>>,
+    G: Parser<Input<'a>, Error = ErrorTree<'a>>,
+    H: Parser<Input<'a>, Error = ErrorTree<'a>>,
 {
     move |input| {
         let (input, expect_closing) = match first.parse(input) {
@@ -220,60 +237,59 @@ mod tests {
     #[test]
     fn optional_delimiter() {
         assert_eq!(
-            opt_delimited::<Input<'_>, Input<'_>, Input<'_>, _, _, _>(
+            opt_delimited(
                 skip_ws_and_comments(tag("1")),
                 skip_ws_and_comments(tag("ab")),
                 skip_ws_and_comments(tag("2"))
-            )("1ab2".into())
+            )
+            .parse("1ab2".into())
             .map(|(i, o)| (i.into_inner(), o.into_inner())),
             Ok(("", "ab"))
         );
         assert_eq!(
-            opt_delimited::<char, Input<'_>, char, _, _, _>(
+            opt_delimited(
                 skip_ws_and_comments(char('(')),
                 skip_ws_and_comments(tag("ab")),
                 skip_ws_and_comments(char(')'))
-            )("ab".into())
+            )
+            .parse("ab".into())
             .map(|(i, o)| (i.into_inner(), o.into_inner())),
             Ok(("", "ab"))
         );
-        assert!(opt_delimited::<char, Input<'_>, char, _, _, _>(
+        assert!(opt_delimited(
             skip_ws_and_comments(char('(')),
             skip_ws_and_comments(tag("ab")),
             skip_ws_and_comments(char(')'))
-        )("( abc".into())
+        )
+        .parse("( abc".into())
         .is_err());
         assert_eq!(
-            opt_delimited::<char, Input<'_>, char, _, _, _>(
+            opt_delimited(
                 skip_ws_and_comments(char('(')),
                 skip_ws_and_comments(tag("ab")),
                 skip_ws_and_comments(char(')'))
-            )(" ab )".into())
+            )
+            .parse(" ab )".into())
             .map(|(i, o)| (i.into_inner(), o.into_inner())),
             Ok((" )", "ab"))
         );
         assert_eq!(
-            in_parentheses(opt_delimited::<char, Input<'_>, char, _, _, _>(
+            in_parentheses(opt_delimited(
                 skip_ws_and_comments(char('(')),
                 skip_ws_and_comments(tag("ab")),
                 skip_ws_and_comments(char(')'))
-            ))("(( ab ))".into())
+            ))
+            .parse("(( ab ))".into())
             .map(|(i, o)| (i.into_inner(), o.into_inner())),
             Ok(("", "ab"))
         );
         assert_eq!(
-            many1(in_parentheses(opt_delimited::<
-                char,
-                ASN1Value,
-                char,
-                _,
-                _,
-                _,
-            >(
+            many1(in_parentheses(opt_delimited(
                 skip_ws_and_comments(char(LEFT_PARENTHESIS)),
                 skip_ws_and_comments(asn1_value),
                 skip_ws_and_comments(char(RIGHT_PARENTHESIS))
-            )))("((5))".into())
+            )))
+            .parse("((5))".into())
             .map(|(i, o)| (i.into_inner(), o)),
             Ok(("", vec![ASN1Value::Integer(5)]))
         );
@@ -282,19 +298,22 @@ mod tests {
     #[test]
     fn takes_until_and_not() {
         assert_eq!(
-            take_until_and_not("\"", "\"\"")(r#"[a-zA-Z]#""(1,8)""(-[a-zA-Z0-9]#(1,8))*""#.into())
+            take_until_and_not("\"", "\"\"")
+                .parse(r#"[a-zA-Z]#""(1,8)""(-[a-zA-Z0-9]#(1,8))*""#.into())
                 .unwrap()
                 .1,
             r#"[a-zA-Z]#""(1,8)""(-[a-zA-Z0-9]#(1,8))*"#
         );
         assert_eq!(
-            take_until_and_not("\"", "\"\"")(r#"[a-zA-Z]#(1,8)""(-[a-zA-Z0-9]#(1,8))*""#.into())
+            take_until_and_not("\"", "\"\"")
+                .parse(r#"[a-zA-Z]#(1,8)""(-[a-zA-Z0-9]#(1,8))*""#.into())
                 .unwrap()
                 .1,
             r#"[a-zA-Z]#(1,8)""(-[a-zA-Z0-9]#(1,8))*"#
         );
         assert_eq!(
-            take_until_and_not("\"", "\"\"")(r#"[a-zA-Z]#(1,8)(-[a-zA-Z0-9]#(1,8))*""#.into())
+            take_until_and_not("\"", "\"\"")
+                .parse(r#"[a-zA-Z]#(1,8)(-[a-zA-Z0-9]#(1,8))*""#.into())
                 .unwrap()
                 .1,
             r#"[a-zA-Z]#(1,8)(-[a-zA-Z0-9]#(1,8))*"#

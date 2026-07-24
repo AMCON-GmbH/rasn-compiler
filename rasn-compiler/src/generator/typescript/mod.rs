@@ -43,7 +43,7 @@ impl Backend for Typescript {
         &mut self,
         tlds: Vec<ToplevelDefinition>,
     ) -> Result<GeneratedModule, GeneratorError> {
-        if let Some((module_ref, _)) = tlds.first().and_then(|tld| tld.get_index().cloned()) {
+        if let Some(module_ref) = tlds.first().and_then(|tld| tld.get_module_header()) {
             let module = module_ref.borrow();
             let namespace = to_jer_identifier(&module.name);
             let imports = module
@@ -119,13 +119,14 @@ impl Backend for Typescript {
                     ASN1Type::SequenceOf(_) | ASN1Type::SetOf(_) => {
                         self.generate_sequence_or_set_of(t)
                     }
+                    ASN1Type::Any => self.generate_any(t),
                     ASN1Type::ElsewhereDeclaredType(_) => self.generate_typealias(t),
                     ASN1Type::Choice(_) => self.generate_choice(t),
                     ASN1Type::Time(_) => unimplemented!("rasn does not support TIME types yet!"),
                     ASN1Type::Real(_) => self.generate_number_like(t),
-                    ASN1Type::InformationObjectFieldReference(_)
-                    | ASN1Type::EmbeddedPdv
-                    | ASN1Type::External => self.generate_any(t),
+                    ASN1Type::ObjectClassField(_) | ASN1Type::EmbeddedPdv | ASN1Type::External => {
+                        self.generate_any(t)
+                    }
                     ASN1Type::OctetString(_) => self.generate_octet_string(t),
                     ASN1Type::ObjectIdentifier(_)
                     | ASN1Type::GeneralizedTime(_)
@@ -143,7 +144,7 @@ impl Backend for Typescript {
             ToplevelDefinition::Macro(_) => Err(GeneratorError {
                 kind: GeneratorErrorType::NotYetInplemented,
                 details: "MACROs are currently unsupported!".to_string(),
-                top_level_declaration: Some(tld),
+                top_level_declaration: Some(Box::new(tld)),
             }),
             _ => Ok(String::new()),
         }

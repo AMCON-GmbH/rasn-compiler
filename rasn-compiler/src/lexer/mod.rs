@@ -12,26 +12,28 @@ use error::ParserResult;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_until},
-    character::complete::multispace1,
+    character::complete::{char, multispace1},
     combinator::{into, map, opt, recognize},
     multi::{many0, many1},
-    sequence::{delimited, pair, preceded, terminated, tuple},
+    sequence::{delimited, pair, preceded, terminated},
+    Parser,
 };
 
-use crate::intermediate::macros::ToplevelMacroDefinition;
 use crate::lexer::macros::macro_definition;
 use crate::{
     input::{context_boundary, Input},
     intermediate::{information_object::*, *},
 };
+use crate::{intermediate::macros::ToplevelMacroDefinition, AsnSourceUnit};
 
 use self::{
-    bit_string::*, boolean::*, character_string::*, choice::*, common::*, constraint::*,
-    embedded_pdv::*, enumerated::*, error::LexerError, external::*, information_object_class::*,
-    integer::*, module_reference::*, null::*, object_identifier::*, octet_string::*,
+    any_type::any_type, bit_string::*, boolean::*, character_string::*, choice::*, common::*,
+    constraint::*, embedded_pdv::*, enumerated::*, error::LexerError, external::*,
+    information_object_class::*, integer::*, null::*, object_identifier::*, octet_string::*,
     parameterization::*, real::*, sequence::*, sequence_of::*, set::*, set_of::*, time::*,
 };
 
+mod any_type;
 mod bit_string;
 mod boolean;
 mod character_string;
@@ -45,7 +47,7 @@ mod external;
 mod information_object_class;
 mod integer;
 pub(crate) mod macros;
-mod module_reference;
+mod module_header;
 mod null;
 mod object_identifier;
 mod octet_string;
@@ -62,10 +64,10 @@ mod util;
 mod tests;
 
 pub fn asn_spec(
-    input: &str,
-) -> Result<Vec<(ModuleReference, Vec<ToplevelDefinition>)>, LexerError> {
+    input: AsnSourceUnit,
+) -> Result<Vec<(ModuleHeader, Vec<ToplevelDefinition>)>, LexerError> {
     let mut result = Vec::new();
-    let mut remaining_input = Input::from(input);
+    let mut remaining_input = Input::from(&input);
     loop {
         match asn_module(remaining_input) {
             Ok((remaining, res)) => {
@@ -87,14 +89,15 @@ pub fn asn_spec(
 
 pub(crate) fn asn_module(
     input: Input<'_>,
-) -> ParserResult<'_, (ModuleReference, Vec<ToplevelDefinition>)> {
+) -> ParserResult<'_, (ModuleHeader, Vec<ToplevelDefinition>)> {
     pair(
-        module_reference,
+        module_header::module_header,
         terminated(
             many0(skip_ws(alt((
+                map(object_class_assignement, ToplevelDefinition::Class),
                 map(
                     top_level_information_declaration,
-                    ToplevelDefinition::Information,
+                    ToplevelDefinition::Object,
                 ),
                 map(top_level_type_declaration, ToplevelDefinition::Type),
                 map(top_level_value_declaration, ToplevelDefinition::Value),
@@ -104,7 +107,8 @@ pub(crate) fn asn_module(
             )))),
             context_boundary(skip_ws_and_comments(alt((end, encoding_control)))),
         ),
-    )(input)
+    )
+    .parse(input)
 }
 
 fn encoding_control(input: Input<'_>) -> ParserResult<'_, &str> {
@@ -112,23 +116,26 @@ fn encoding_control(input: Input<'_>) -> ParserResult<'_, &str> {
         skip_ws_and_comments(tag(ENCODING_CONTROL)),
         take_until(END),
         end,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 fn end(input: Input<'_>) -> ParserResult<'_, &str> {
     skip_ws_and_comments(into_inner(preceded(
         tag(END),
         recognize(many0(alt((comment, into_inner(multispace1))))),
-    )))(input)
+    )))
+    .parse(input)
 }
 
 pub fn top_level_type_declaration(input: Input<'_>) -> ParserResult<'_, ToplevelTypeDefinition> {
-    into(tuple((
+    into((
         skip_ws(many0(comment)),
-        skip_ws(title_case_identifier),
+        skip_ws(type_reference),
         opt(parameterization),
         preceded(assignment, pair(opt(asn_tag), asn1_type)),
-    )))(input)
+    ))
+    .parse(input)
 }
 
 pub fn top_level_information_declaration(
@@ -137,14 +144,15 @@ pub fn top_level_information_declaration(
     skip_ws(alt((
         top_level_information_object_declaration,
         top_level_object_set_declaration,
-        top_level_object_class_declaration,
-    )))(input)
+    )))
+    .parse(input)
 }
 
 pub fn asn1_type(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
     alt((
         alt((
             null,
+            any_type,
             selection_type_choice,
             object_identifier,
             sequence_of,
@@ -167,12 +175,11 @@ pub fn asn1_type(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
             time,
             octet_string,
             character_string,
-            map(information_object_field_reference, |i| {
-                ASN1Type::InformationObjectFieldReference(i)
-            }),
+            map(object_class_field_type, ASN1Type::ObjectClassField),
             elsewhere_declared_type,
         )),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 pub fn asn1_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
@@ -181,95 +188,104 @@ pub fn asn1_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
         null_value,
         map(object_identifier_value, ASN1Value::ObjectIdentifier),
         choice_value,
-        real_value,
         sequence_value,
         time_value,
         bit_string_value,
         boolean_value,
         integer_value,
+        real_value,
         character_string_value,
         elsewhere_declared_value,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 pub fn elsewhere_declared_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
     map(
-        pair(
+        (
+            opt(terminated(
+                skip_ws_and_comments(module_reference),
+                skip_ws_and_comments(char(DOT)),
+            )),
             opt(skip_ws_and_comments(recognize(many1(pair(
                 identifier,
                 tag(".&"),
             ))))),
-            value_identifier,
+            skip_ws_and_comments(value_reference),
         ),
-        |(p, id)| ASN1Value::ElsewhereDeclaredValue {
+        |(m, p, id)| ASN1Value::ElsewhereDeclaredValue {
+            module: m.map(str::to_owned),
             parent: p.map(|par| par.inner().to_string()),
             identifier: id.into(),
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 pub fn elsewhere_declared_type(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
     map(
-        tuple((
-            opt(skip_ws_and_comments(recognize(many1(pair(
+        (
+            opt(skip_ws_and_comments(into_inner(recognize(many1(pair(
                 identifier,
                 tag(".&"),
-            ))))),
-            skip_ws_and_comments(title_case_identifier),
-            opt(skip_ws_and_comments(constraint)),
-        )),
-        |(parent, id, constraints)| {
-            ASN1Type::builtin_or_elsewhere(parent.map(|p| p.into_inner()), id, constraints)
+            )))))),
+            opt(skip_ws_and_comments(terminated(
+                module_reference,
+                skip_ws_and_comments(char(DOT)),
+            ))),
+            skip_ws_and_comments(type_reference),
+            opt(skip_ws_and_comments(constraints)),
+        ),
+        |(parent, module, id, constraints)| {
+            ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
+                parent: parent.map(str::to_owned),
+                module: module.map(str::to_owned),
+                identifier: id.to_owned(),
+                constraints: constraints.unwrap_or_default(),
+            })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 fn top_level_value_declaration(input: Input<'_>) -> ParserResult<'_, ToplevelValueDefinition> {
     alt((
-        into(tuple((
+        into((
             skip_ws(many0(comment)),
-            skip_ws(context_boundary(value_identifier)),
+            skip_ws(context_boundary(value_reference)),
             skip_ws_and_comments(opt(parameterization)),
             skip_ws_and_comments(asn1_type),
             preceded(assignment, skip_ws_and_comments(asn1_value)),
-        ))),
+        )),
         enumerated_value,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 fn top_level_information_object_declaration(
     input: Input<'_>,
 ) -> ParserResult<'_, ToplevelInformationDefinition> {
-    into(tuple((
+    into((
         skip_ws(many0(comment)),
         skip_ws(context_boundary(identifier)),
         skip_ws(opt(parameterization)),
         skip_ws(uppercase_identifier),
         preceded(assignment, information_object),
-    )))(input)
+    ))
+    .parse(input)
 }
 
 fn top_level_object_set_declaration(
     input: Input<'_>,
 ) -> ParserResult<'_, ToplevelInformationDefinition> {
-    into(tuple((
+    into((
         skip_ws(many0(comment)),
         skip_ws(context_boundary(identifier)),
         skip_ws(opt(parameterization)),
         skip_ws(uppercase_identifier),
         preceded(assignment, object_set),
-    )))(input)
-}
-
-fn top_level_object_class_declaration(
-    input: Input<'_>,
-) -> ParserResult<'_, ToplevelInformationDefinition> {
-    into(tuple((
-        skip_ws(many0(comment)),
-        skip_ws(context_boundary(uppercase_identifier)),
-        skip_ws(opt(parameterization)),
-        preceded(assignment, alt((type_identifier, information_object_class))),
-    )))(input)
+    ))
+    .parse(input)
 }
 
 #[test]
@@ -277,12 +293,12 @@ fn eof_comments() {
     println!(
         "{:#?}",
         pair(
-            module_reference,
+            module_header::module_header,
             terminated(
                 many0(skip_ws(alt((
                     map(
                         top_level_information_declaration,
-                        ToplevelDefinition::Information,
+                        ToplevelDefinition::Object,
                     ),
                     map(top_level_type_declaration, ToplevelDefinition::Type),
                     map(top_level_value_declaration, ToplevelDefinition::Value),
@@ -292,7 +308,8 @@ fn eof_comments() {
                     recognize(many0(alt((comment, into_inner(multispace1))))),
                 ))))
             )
-        )(
+        )
+        .parse(
             r#"
 LdapSystemSchema {joint-iso-itu-t ds(5) module(1) ldapSystemSchema(38) 9}
 DEFINITIONS ::=
@@ -305,5 +322,22 @@ END -- LdapSystemSchema"#
         )
         .unwrap()
         .0
+    );
+}
+
+#[test]
+fn test_elsewhere_declared_value_in_module() {
+    let input = Input::from("NLM.sNPADTEAddress");
+
+    let (rest, result) = elsewhere_declared_value(input).unwrap();
+
+    assert!(rest.is_empty());
+    assert_eq!(
+        result,
+        ASN1Value::ElsewhereDeclaredValue {
+            module: Some("NLM".to_owned()),
+            parent: None,
+            identifier: "sNPADTEAddress".to_owned()
+        }
     );
 }

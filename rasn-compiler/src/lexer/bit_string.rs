@@ -5,11 +5,12 @@ use nom::{
     combinator::{map, opt},
     multi::{fold_many0, separated_list0},
     sequence::{delimited, pair, preceded},
+    Parser,
 };
 
 use crate::{input::Input, intermediate::*};
 
-use super::{common::*, constraint::constraint, error::ParserResult, util::hex_to_bools};
+use super::{common::*, constraint::constraints, error::ParserResult, util::hex_to_bools};
 
 /// Parses a BIT STRING value. Currently, the lexer only supports parsing binary and
 /// hexadecimal values, but not the named bit notation in curly braces.
@@ -38,14 +39,15 @@ pub fn bit_string_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
         map(
             skip_ws_and_comments(delimited(
                 char(LEFT_BRACE),
-                separated_list0(char(','), skip_ws_and_comments(value_identifier)),
+                separated_list0(char(','), skip_ws_and_comments(value_reference)),
                 char(RIGHT_BRACE),
             )),
             |named_bits| {
                 ASN1Value::BitStringNamedBits(named_bits.into_iter().map(String::from).collect())
             },
         ),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Tries to parse an ASN1 BIT STRING
@@ -60,10 +62,11 @@ pub fn bit_string(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
     map(
         preceded(
             skip_ws_and_comments(tag(BIT_STRING)),
-            pair(opt(distinguished_values), opt(constraint)),
+            pair(opt(distinguished_values), opt(constraints)),
         ),
         |m| ASN1Type::BitString(m.into()),
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]
@@ -92,9 +95,9 @@ mod tests {
             bit_string(sample).unwrap().1,
             ASN1Type::BitString(BitString {
                 distinguished_values: None,
-                constraints: vec![Constraint::SubtypeConstraint(ElementSet {
-                    set: ElementOrSetOperation::Element(SubtypeElement::SizeConstraint(Box::new(
-                        ElementOrSetOperation::Element(SubtypeElement::SingleValue {
+                constraints: vec![Constraint::Subtype(ElementSetSpecs {
+                    set: ElementOrSetOperation::Element(SubtypeElements::SizeConstraint(Box::new(
+                        ElementOrSetOperation::Element(SubtypeElements::SingleValue {
                             value: ASN1Value::Integer(8),
                             extensible: false
                         })
@@ -112,9 +115,9 @@ mod tests {
             bit_string(sample).unwrap().1,
             ASN1Type::BitString(BitString {
                 distinguished_values: None,
-                constraints: vec![Constraint::SubtypeConstraint(ElementSet {
-                    set: ElementOrSetOperation::Element(SubtypeElement::SizeConstraint(Box::new(
-                        ElementOrSetOperation::Element(SubtypeElement::ValueRange {
+                constraints: vec![Constraint::Subtype(ElementSetSpecs {
+                    set: ElementOrSetOperation::Element(SubtypeElements::SizeConstraint(Box::new(
+                        ElementOrSetOperation::Element(SubtypeElements::ValueRange {
                             min: Some(ASN1Value::Integer(8)),
                             max: Some(ASN1Value::Integer(18)),
                             extensible: false
@@ -133,9 +136,9 @@ mod tests {
             bit_string(sample).unwrap().1,
             ASN1Type::BitString(BitString {
                 distinguished_values: None,
-                constraints: vec![Constraint::SubtypeConstraint(ElementSet {
-                    set: ElementOrSetOperation::Element(SubtypeElement::SizeConstraint(Box::new(
-                        ElementOrSetOperation::Element(SubtypeElement::SingleValue {
+                constraints: vec![Constraint::Subtype(ElementSetSpecs {
+                    set: ElementOrSetOperation::Element(SubtypeElements::SizeConstraint(Box::new(
+                        ElementOrSetOperation::Element(SubtypeElements::SingleValue {
                             value: ASN1Value::Integer(2),
                             extensible: true
                         })
@@ -153,9 +156,9 @@ mod tests {
             bit_string(sample).unwrap().1,
             ASN1Type::BitString(BitString {
                 distinguished_values: None,
-                constraints: vec![Constraint::SubtypeConstraint(ElementSet {
-                    set: ElementOrSetOperation::Element(SubtypeElement::SizeConstraint(Box::new(
-                        ElementOrSetOperation::Element(SubtypeElement::ValueRange {
+                constraints: vec![Constraint::Subtype(ElementSetSpecs {
+                    set: ElementOrSetOperation::Element(SubtypeElements::SizeConstraint(Box::new(
+                        ElementOrSetOperation::Element(SubtypeElements::ValueRange {
                             min: Some(ASN1Value::Integer(8)),
                             max: Some(ASN1Value::Integer(18)),
                             extensible: true
@@ -197,9 +200,9 @@ mod tests {
                         value: 3
                     },
                 ]),
-                constraints: vec![Constraint::SubtypeConstraint(ElementSet {
-                    set: ElementOrSetOperation::Element(SubtypeElement::SizeConstraint(Box::new(
-                        ElementOrSetOperation::Element(SubtypeElement::SingleValue {
+                constraints: vec![Constraint::Subtype(ElementSetSpecs {
+                    set: ElementOrSetOperation::Element(SubtypeElements::SizeConstraint(Box::new(
+                        ElementOrSetOperation::Element(SubtypeElements::SingleValue {
                             value: ASN1Value::Integer(4),
                             extensible: false
                         })

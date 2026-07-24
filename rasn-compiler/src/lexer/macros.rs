@@ -3,16 +3,17 @@ use nom::bytes::complete::tag;
 use nom::character::complete::char;
 use nom::combinator::{cut, map, map_res, not, opt, peek, value};
 use nom::multi::{many0, many1, separated_list1};
-use nom::sequence::{delimited, pair, preceded, separated_pair, terminated, tuple};
+use nom::sequence::{delimited, pair, preceded, separated_pair, terminated};
+use nom::Parser;
 
 use crate::input::{context_boundary, Input};
 use crate::intermediate::{
     ASN1Type, ASN1Value, DeclarationElsewhere, ASN1_KEYWORDS, ASSIGN, BEGIN, DOT, END,
-    GREATER_THAN, LESS_THAN, MACRO, PIPE,
+    GREATER_THAN, LEFT_PARENTHESIS, LESS_THAN, MACRO, PIPE, RIGHT_PARENTHESIS,
 };
 use crate::lexer::common::{
-    in_parentheses, skip_ws_and_comments, title_case_identifier, uppercase_identifier,
-    value_identifier,
+    in_parentheses, module_reference, skip_ws_and_comments, type_reference, uppercase_identifier,
+    value_reference,
 };
 use crate::lexer::error::{MiscError, ParserResult};
 use crate::lexer::{asn1_type, asn1_value};
@@ -56,7 +57,7 @@ pub struct Production<'i> {
 /// MacroDefinition ::=
 ///     macroreference MACRO "::=" MacroSubstance
 /// ```
-pub fn macro_definition(input: Input<'_>) -> ParserResult<'_, MacroDefinition> {
+pub fn macro_definition(input: Input<'_>) -> ParserResult<'_, MacroDefinition<'_>> {
     map(
         separated_pair(
             skip_ws_and_comments(macro_reference),
@@ -70,7 +71,8 @@ pub fn macro_definition(input: Input<'_>) -> ParserResult<'_, MacroDefinition> {
             name: v.0,
             substance: v.1,
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parse a macro substance.
@@ -83,7 +85,7 @@ pub fn macro_definition(input: Input<'_>) -> ParserResult<'_, MacroDefinition> {
 ///     macroreference           |
 ///     Externalmacroreference
 /// ```
-fn macro_substance(input: Input<'_>) -> ParserResult<'_, MacroSubstance> {
+fn macro_substance(input: Input<'_>) -> ParserResult<'_, MacroSubstance<'_>> {
     skip_ws_and_comments(alt((
         map(
             delimited(tag(BEGIN), cut(macro_body), skip_ws_and_comments(tag(END))),
@@ -96,7 +98,8 @@ fn macro_substance(input: Input<'_>) -> ParserResult<'_, MacroSubstance> {
                 macro_reference: v.1,
             }
         }),
-    )))(input)
+    )))
+    .parse(input)
 }
 
 /// Parse a macro body.
@@ -116,9 +119,9 @@ fn macro_substance(input: Input<'_>) -> ParserResult<'_, MacroSubstance> {
 ///     VALUE PRODUCTION "::=" MacroAlternativeList
 ///
 /// ```
-fn macro_body(input: Input<'_>) -> ParserResult<'_, MacroBody> {
+fn macro_body(input: Input<'_>) -> ParserResult<'_, MacroBody<'_>> {
     map(
-        tuple((
+        (
             preceded(
                 pair(
                     skip_ws_and_comments(tag("TYPE NOTATION")),
@@ -134,13 +137,14 @@ fn macro_body(input: Input<'_>) -> ParserResult<'_, MacroBody> {
                 skip_ws_and_comments(macro_alternative_list),
             ),
             supporting_productions,
-        )),
+        ),
         |v| MacroBody {
             type_production: v.0,
             value_production: v.1,
             supporting_productions: v.2,
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parse supporting productions.
@@ -159,7 +163,7 @@ fn macro_body(input: Input<'_>) -> ParserResult<'_, MacroBody> {
 /// Production ::=
 ///     productionreference "::=" MacroAlternativeList
 /// ```
-fn supporting_productions(input: Input<'_>) -> ParserResult<'_, Vec<Production>> {
+fn supporting_productions(input: Input<'_>) -> ParserResult<'_, Vec<Production<'_>>> {
     many0(map(
         separated_pair(
             skip_ws_and_comments(production_reference),
@@ -170,7 +174,8 @@ fn supporting_productions(input: Input<'_>) -> ParserResult<'_, Vec<Production>>
             name: v.0,
             alternatives: v.1,
         },
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Parse an external macro reference.
@@ -183,10 +188,11 @@ fn supporting_productions(input: Input<'_>) -> ParserResult<'_, Vec<Production>>
 /// ```
 fn external_macro_reference(input: Input<'_>) -> ParserResult<'_, (&'_ str, &'_ str)> {
     separated_pair(
-        title_case_identifier,
+        module_reference,
         skip_ws_and_comments(char(DOT)),
         skip_ws_and_comments(macro_reference),
-    )(input)
+    )
+    .parse(input)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -234,8 +240,8 @@ pub enum SymbolDefn<'i> {
 ///
 /// MacroAlternative ::= SymbolList
 /// ```
-fn macro_alternative_list(input: Input<'_>) -> ParserResult<'_, Vec<Vec<SymbolElement>>> {
-    separated_list1(skip_ws_and_comments(tag(PIPE)), symbol_list)(input)
+fn macro_alternative_list(input: Input<'_>) -> ParserResult<'_, Vec<Vec<SymbolElement<'_>>>> {
+    separated_list1(skip_ws_and_comments(tag(PIPE)), symbol_list).parse(input)
 }
 
 /// Parse a symbol list.
@@ -251,14 +257,15 @@ fn macro_alternative_list(input: Input<'_>) -> ParserResult<'_, Vec<Vec<SymbolEl
 ///     SymbolDefn  |
 ///     EmbeddedDefinitions
 /// ```
-fn symbol_list(input: Input<'_>) -> ParserResult<'_, Vec<SymbolElement>> {
+fn symbol_list(input: Input<'_>) -> ParserResult<'_, Vec<SymbolElement<'_>>> {
     many1(terminated(
         skip_ws_and_comments(alt((
             map(symbol_defn, SymbolElement::SymbolDefn),
             map(embedded_definitions, SymbolElement::EmbeddedDefinitions),
         ))),
         skip_ws_and_comments(not(peek(tag(ASSIGN)))),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Parse a symbol definition.
@@ -294,23 +301,42 @@ fn symbol_defn(input: Input<'_>) -> ParserResult<'_, SymbolDefn<'_>> {
             },
         ),
         preceded(
-            tag("value"),
-            cut(in_parentheses(alt((
-                map(macro_type, SymbolDefn::ValueMacroType),
+            (tag("value"), skip_ws_and_comments(char(LEFT_PARENTHESIS))),
+            cut(alt((
                 map(
-                    preceded(tag("VALUE"), cut(skip_ws_and_comments(macro_type))),
+                    terminated(macro_type, skip_ws_and_comments(char(RIGHT_PARENTHESIS))),
+                    SymbolDefn::ValueMacroType,
+                ),
+                map(
+                    delimited(
+                        tag("VALUE"),
+                        skip_ws_and_comments(macro_type),
+                        skip_ws_and_comments(char(RIGHT_PARENTHESIS)),
+                    ),
                     SymbolDefn::ValueVALUEMacroType,
                 ),
                 map(
-                    pair(local_value_reference, skip_ws_and_comments(macro_type)),
+                    terminated(
+                        (
+                            alt((
+                                local_value_reference,
+                                // Type references are not allowed here, parse it anyway for
+                                // compatibility with for example SNMPv2-SMI.
+                                local_type_reference,
+                            )),
+                            skip_ws_and_comments(macro_type),
+                        ),
+                        skip_ws_and_comments(char(RIGHT_PARENTHESIS)),
+                    ),
                     |v| SymbolDefn::ValueLocalvaluereferenceMacroType {
                         local_value_reference: v.0,
                         ty: v.1,
                     },
                 ),
-            )))),
+            ))),
         ),
-    )))(input)
+    )))
+    .parse(input)
 }
 
 /// Parse astring, that is, a string literal.
@@ -318,7 +344,7 @@ fn symbol_defn(input: Input<'_>) -> ParserResult<'_, SymbolDefn<'_>> {
 /// String literals in MACROs are a bit simpler than regular string literals. The only
 /// transformation is to replace any escaped double quotes `""` with a single `"`.
 fn astring(input: Input<'_>) -> ParserResult<'_, String> {
-    map(raw_string_literal, |s| s.replace("\"\"", "\""))(input)
+    map(raw_string_literal, |s| s.replace("\"\"", "\"")).parse(input)
 }
 
 /// Parse a macro type.
@@ -341,7 +367,8 @@ fn macro_type(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
             ))
         }
         _ => Ok(v),
-    }))(input)
+    }))
+    .parse(input)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -374,12 +401,13 @@ pub struct LocalValueassignment<'i> {
 ///     EmbeddedDefinition |
 ///     EmbeddedDefinitionList EmbeddedDefinition
 /// ```
-fn embedded_definitions(input: Input<'_>) -> ParserResult<'_, Vec<EmbeddedDefinition>> {
+fn embedded_definitions(input: Input<'_>) -> ParserResult<'_, Vec<EmbeddedDefinition<'_>>> {
     delimited(
         skip_ws_and_comments(char(LESS_THAN)),
         cut(many1(skip_ws_and_comments(embedded_definition))),
         skip_ws_and_comments(char(GREATER_THAN)),
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parse an embedded definition.
@@ -391,11 +419,12 @@ fn embedded_definitions(input: Input<'_>) -> ParserResult<'_, Vec<EmbeddedDefini
 ///     LocalTypeassignment |
 ///     LocalValueassignment
 /// ```
-fn embedded_definition(input: Input<'_>) -> ParserResult<'_, EmbeddedDefinition> {
+fn embedded_definition(input: Input<'_>) -> ParserResult<'_, EmbeddedDefinition<'_>> {
     alt((
         map(local_type_assignement, EmbeddedDefinition::Type),
         map(local_value_assignement, EmbeddedDefinition::Value),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Parse a local type assignement.
@@ -406,7 +435,7 @@ fn embedded_definition(input: Input<'_>) -> ParserResult<'_, EmbeddedDefinition>
 /// LocalTypeReference ::=
 ///     localtypereference "::=" MacroType
 /// ```
-fn local_type_assignement(input: Input<'_>) -> ParserResult<'_, LocalTypeassignment> {
+fn local_type_assignement(input: Input<'_>) -> ParserResult<'_, LocalTypeassignment<'_>> {
     map(
         separated_pair(
             local_type_reference,
@@ -414,7 +443,8 @@ fn local_type_assignement(input: Input<'_>) -> ParserResult<'_, LocalTypeassignm
             skip_ws_and_comments(macro_type),
         ),
         |v| LocalTypeassignment { name: v.0, ty: v.1 },
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parse a local value assignement.
@@ -425,19 +455,20 @@ fn local_type_assignement(input: Input<'_>) -> ParserResult<'_, LocalTypeassignm
 /// LocalValueassignment ::=
 ///     localvaluereference MacroType "::=" MacroValue
 /// ```
-fn local_value_assignement(input: Input<'_>) -> ParserResult<'_, LocalValueassignment> {
+fn local_value_assignement(input: Input<'_>) -> ParserResult<'_, LocalValueassignment<'_>> {
     map(
-        tuple((
+        (
             skip_ws_and_comments(local_value_reference),
             skip_ws_and_comments(macro_type),
             skip_ws_and_comments(preceded(tag(ASSIGN), skip_ws_and_comments(macro_value))),
-        )),
+        ),
         |v| LocalValueassignment {
             name: v.0,
             ty: v.1,
             value: v.2,
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parse a macro value.
@@ -460,7 +491,8 @@ fn macro_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
             ))
         }
         _ => Ok(v),
-    }))(input)
+    }))
+    .parse(input)
 }
 
 /// Keywords not allowed for some MACRO items.
@@ -483,12 +515,17 @@ fn macro_reference(input: Input<'_>) -> ParserResult<'_, &'_ str> {
         } else {
             Ok(v)
         }
-    })(input)
+    })
+    .parse(input)
 }
 
 /// Parse a production reference.
+///
+/// #### X.680 1994 J.2.2 Productionreference
+/// _A "productionreference" shall consist of the sequence of characters specified for a
+/// "typereference" in 9.2._
 fn production_reference(input: Input<'_>) -> ParserResult<'_, &'_ str> {
-    map_res(title_case_identifier, |v| {
+    map_res(type_reference, |v| {
         if ADDITIONAL_KEYWORDS.contains(&v) {
             Err(MiscError(
                 "Production reference can not be a keyword when used in ASN.1 MACRO.",
@@ -496,12 +533,18 @@ fn production_reference(input: Input<'_>) -> ParserResult<'_, &'_ str> {
         } else {
             Ok(v)
         }
-    })(input)
+    })
+    .parse(input)
 }
 
 /// Parse a local type reference.
+///
+/// #### X.680 1994 J.2.3 Localtypereference
+/// _A "localtypereference" shall consist of the sequence of characters specified for a
+/// "typereference" in 9.2. A "localtypereference" is used as an identifier for types which are
+/// recognized during syntax analysis of an instance of the new type or value notation._
 fn local_type_reference(input: Input<'_>) -> ParserResult<'_, &'_ str> {
-    map_res(title_case_identifier, |v| {
+    map_res(type_reference, |v| {
         if ADDITIONAL_KEYWORDS.contains(&v) {
             Err(MiscError(
                 "Type reference can not be a keyword when used in ASN.1 MACRO.",
@@ -509,12 +552,13 @@ fn local_type_reference(input: Input<'_>) -> ParserResult<'_, &'_ str> {
         } else {
             Ok(v)
         }
-    })(input)
+    })
+    .parse(input)
 }
 
 /// Parse a local value reference
 fn local_value_reference(input: Input<'_>) -> ParserResult<'_, &'_ str> {
-    map_res(value_identifier, |v| {
+    map_res(value_reference, |v| {
         if ADDITIONAL_KEYWORDS.contains(&v) {
             Err(MiscError(
                 "Value reference can not be a keyword when used in ASN.1 MACRO.",
@@ -522,7 +566,8 @@ fn local_value_reference(input: Input<'_>) -> ParserResult<'_, &'_ str> {
         } else {
             Ok(v)
         }
-    })(input)
+    })
+    .parse(input)
 }
 
 #[cfg(test)]
@@ -633,6 +678,7 @@ mod tests {
                                     local_value_reference: "vartype",
                                     ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                                         parent: None,
+                                        module: None,
                                         identifier: "ObjectName".to_string(),
                                         constraints: vec![]
                                     })
@@ -652,6 +698,7 @@ mod tests {
                                             ty: ASN1Type::ElsewhereDeclaredType(
                                                 DeclarationElsewhere {
                                                     parent: None,
+                                                    module: None,
                                                     identifier: "DisplayString".to_string(),
                                                     constraints: vec![]
                                                 }
@@ -675,6 +722,7 @@ mod tests {
                                             ty: ASN1Type::ElsewhereDeclaredType(
                                                 DeclarationElsewhere {
                                                     parent: None,
+                                                    module: None,
                                                     identifier: "DisplayString".to_string(),
                                                     constraints: vec![]
                                                 }

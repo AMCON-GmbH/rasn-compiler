@@ -3,6 +3,7 @@ use nom::{
     bytes::complete::tag,
     combinator::{into, map, opt, value},
     sequence::preceded,
+    Parser,
 };
 
 use crate::{
@@ -10,13 +11,14 @@ use crate::{
     intermediate::{ASN1Type, ASN1Value, BOOLEAN, FALSE, TRUE},
 };
 
-use super::{common::skip_ws_and_comments, constraint::constraint, error::ParserResult};
+use super::{common::skip_ws_and_comments, constraint::constraints, error::ParserResult};
 
 pub fn boolean_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
     alt((
         value(ASN1Value::Boolean(true), skip_ws_and_comments(tag(TRUE))),
         value(ASN1Value::Boolean(false), skip_ws_and_comments(tag(FALSE))),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Tries to parse an ASN1 BOOLEAN
@@ -31,10 +33,11 @@ pub fn boolean(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
     map(
         into(skip_ws_and_comments(preceded(
             tag(BOOLEAN),
-            skip_ws_and_comments(opt(constraint)),
+            skip_ws_and_comments(opt(constraints)),
         ))),
         ASN1Type::Boolean,
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]

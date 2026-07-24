@@ -23,13 +23,16 @@ mod builder;
 mod template;
 mod utils;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 /// A compiler backend that generates bindings to be used with
 /// the `rasn` framework for rust.
 pub struct Rasn {
     config: Config,
     tagging_environment: TaggingEnvironment,
     extensibility_environment: ExtensibilityEnvironment,
+    /// A combination of the builtin required derives (`Rasn::REQUIRED_DERIVES`) and those supplied
+    /// by the user in `Config::type_annotations`.
+    required_derives: Vec<String>,
 }
 
 #[cfg_attr(target_family = "wasm", wasm_bindgen(getter_with_clone))]
@@ -67,6 +70,8 @@ pub struct Config {
     ///
     /// Default: `vec![String::from("#[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]")]`
     pub type_annotations: Vec<String>,
+    /// Create bindings for a `no_std` environment
+    pub no_std_compliant_bindings: bool,
 }
 
 #[cfg(target_family = "wasm")]
@@ -76,6 +81,7 @@ impl Config {
     pub fn new(
         opaque_open_types: bool,
         default_wildcard_imports: bool,
+        no_std_compliant_bindings: bool,
         generate_from_impls: Option<bool>,
         custom_imports: Option<Box<[String]>>,
         type_annotations: Option<Box<[String]>>,
@@ -83,6 +89,7 @@ impl Config {
         Self {
             opaque_open_types,
             default_wildcard_imports,
+            no_std_compliant_bindings,
             generate_from_impls: generate_from_impls.unwrap_or(false),
             custom_imports: custom_imports.map_or(Vec::new(), |c| c.into_vec()),
             type_annotations: type_annotations
@@ -97,6 +104,7 @@ impl Default for Config {
             opaque_open_types: true,
             default_wildcard_imports: false,
             generate_from_impls: false,
+            no_std_compliant_bindings: false,
             custom_imports: Vec::default(),
             type_annotations: vec![String::from(
                 "#[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]",
@@ -111,22 +119,44 @@ impl Backend for Rasn {
     const FILE_EXTENSION: &'static str = ".rs";
 
     fn new(
-        config: Self::Config,
+        mut config: Self::Config,
         tagging_environment: TaggingEnvironment,
         extensibility_environment: ExtensibilityEnvironment,
     ) -> Self {
+        // Remove derive's from config.type_annotations, so that they can be combined with required
+        // derives, and handled more optimally in later steps.
+        let mut required_derives: Vec<_> = Self::REQUIRED_DERIVES
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut non_derive_annotations = Vec::new();
+        for cfg_annotation in config.type_annotations {
+            if let Ok((_, derives)) = parse_rust_derive_annotation(&cfg_annotation) {
+                for derive in derives {
+                    if !required_derives.iter().any(|d| d == derive) {
+                        required_derives.push(derive.to_owned());
+                    }
+                }
+            } else {
+                non_derive_annotations.push(cfg_annotation);
+            }
+        }
+        config.type_annotations = non_derive_annotations;
+
         Self {
             config,
             extensibility_environment,
             tagging_environment,
+            required_derives,
         }
     }
 
     fn from_config(config: Self::Config) -> Self {
-        Self {
+        Self::new(
             config,
-            ..Default::default()
-        }
+            TaggingEnvironment::default(),
+            ExtensibilityEnvironment::default(),
+        )
     }
 
     fn config(&self) -> &Self::Config {
@@ -137,7 +167,7 @@ impl Backend for Rasn {
         &mut self,
         tlds: Vec<ToplevelDefinition>,
     ) -> Result<GeneratedModule, GeneratorError> {
-        if let Some((module_ref, _)) = tlds.first().and_then(|tld| tld.get_index().cloned()) {
+        if let Some(module_ref) = tlds.first().and_then(|tld| tld.get_module_header()) {
             let module = module_ref.borrow();
             self.tagging_environment = module.tagging_environment;
             self.extensibility_environment = module.extensibility_environment;
@@ -190,6 +220,11 @@ impl Backend for Rasn {
                         }
                     }
                 });
+            let lazy_const_import = if self.config.no_std_compliant_bindings {
+                quote!(lazy_static::lazy_static)
+            } else {
+                quote!(std::sync::LazyLock)
+            };
             Ok(GeneratedModule {
                 generated: Some(quote! {
                 #[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, unused,
@@ -198,8 +233,8 @@ impl Backend for Rasn {
                     extern crate alloc;
 
                     use core::borrow::Borrow;
+                    use #lazy_const_import;
                     use rasn::prelude::*;
-                    use lazy_static::lazy_static;
                     #(#custom_imports)*
                     #(#imports)*
 
@@ -228,6 +263,9 @@ impl Backend for Rasn {
 }
 
 impl Rasn {
+    const REQUIRED_DERIVES: [&'static str; 6] =
+        ["AsnType", "Debug", "Clone", "Decode", "Encode", "PartialEq"];
+
     fn get_rustfmt_path() -> Result<PathBuf, Box<dyn Error>> {
         // Try ~/.cargo/bin/rustfmt style paths first
         if let Ok(path) = env::var("CARGO_HOME").map(PathBuf::from).map(|mut path| {
@@ -283,17 +321,48 @@ impl Rasn {
         match String::from_utf8(output) {
             Ok(bindings) => match status.code() {
                 Some(0) => Ok(bindings),
-                Some(2) => Err(Box::new(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Rustfmt parsing errors.".to_string(),
-                ))),
+                Some(2) => Err(Box::new(io::Error::other("Rustfmt parsing errors."))),
                 Some(3) => Ok(bindings),
-                _ => Err(Box::new(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Internal rustfmt error".to_string(),
-                ))),
+                _ => Err(Box::new(io::Error::other("Internal rustfmt error"))),
             },
             _ => Ok(bindings),
         }
+    }
+}
+
+fn parse_rust_derive_annotation(input: &str) -> nom::IResult<&str, Vec<&str>> {
+    use nom::{
+        bytes::complete::tag,
+        character::complete::{alphanumeric1, char, multispace0},
+        multi::{many0, separated_list1},
+        sequence::delimited,
+        Parser as _,
+    };
+
+    delimited(
+        (
+            multispace0,
+            char('#'),
+            multispace0,
+            char('['),
+            multispace0,
+            tag("derive"),
+            multispace0,
+            char('('),
+            multispace0,
+        ),
+        separated_list1(many0((multispace0, char(','), multispace0)), alphanumeric1),
+        (multispace0, char(')'), multispace0, char(']')),
+    )
+    .parse(input)
+}
+
+impl Default for Rasn {
+    fn default() -> Self {
+        Self::new(
+            Config::default(),
+            TaggingEnvironment::default(),
+            ExtensibilityEnvironment::default(),
+        )
     }
 }

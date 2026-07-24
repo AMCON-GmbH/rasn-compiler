@@ -89,7 +89,7 @@ pub(crate) fn walk_object_field_ref_path<'a>(
 /// Resolves the custom syntax declared in an information object class' WITH SYNTAX clause
 pub fn resolve_custom_syntax(
     fields: &mut InformationObjectFields,
-    class: &InformationObjectClass,
+    class: &ObjectClassDefn,
 ) -> Result<(), GrammarError> {
     if let InformationObjectFields::CustomSyntax(application) = fields {
         let tokens = match &class.syntax {
@@ -209,7 +209,9 @@ pub fn resolve_custom_syntax(
                                 ));
                             }
                         }
-                        _ => continue 'syntax_matching,
+                        SyntaxApplication::Comma | SyntaxApplication::Literal(_) => {
+                            // Skip ahead
+                        }
                     }
                     application_index += 1;
                 } else if *required {

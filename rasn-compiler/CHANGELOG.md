@@ -1,10 +1,112 @@
 # Changelog
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.14.3](https://github.com/librasn/compiler/compare/rasn-compiler-v0.14.2...rasn-compiler-v0.14.3) - 2025-08-25
+
+### Fixed
+
+- fix tests
+
+### Other
+
+- Support more advanced constraints.
+- Correct handling of non-known-multiplier string types.
+
+## [0.14.2](https://github.com/librasn/compiler/compare/rasn-compiler-v0.14.1...rasn-compiler-v0.14.2) - 2025-08-13
+
+### Other
+
+- Include `src_file` in `Debug` for `Input`
+- Include file name in compiler errors
+
+## [0.14.1](https://github.com/librasn/compiler/compare/rasn-compiler-v0.14.0...rasn-compiler-v0.14.1) - 2025-08-08
+
+### Added
+
+- *(lexer)* More robust parsing of SymbolDefn in MACROs
+- *(rasn-generator)* add config parameter for compiling for no_std targets
+
+### Other
+
+- Fix hidden elided lifetimes warning
+- Merge pull request #143 from Rawk/qualified-type-ref
+- Merge pull request #146 from Rawk/impl-default-sequence
+- Merge pull request #145 from Rawk/seq-or-set-optionality
+- Use Optionality for SequenceOrSetMember
+- Move Optionality to types.rs
+# Changelog
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.16.0](https://github.com/librasn/compiler/compare/rasn-compiler-v0.15.0...rasn-compiler-v0.16.0) - 2025-12-31
+
+### Other
+
+- Merge pull request #181 from Rawk/choice-without-constraint
+- Merge pull request #182 from Rawk/fix-realnumber
+- Merge pull request #178 from Rawk/refactor-builtin_or_elsewhere
+- Merge pull request #172 from Rawk/elswhere-declared-value-in-module
+- Format and fix warnings
+
+## [0.15.0](https://github.com/librasn/compiler/compare/rasn-compiler-v0.14.3...rasn-compiler-v0.15.0) - 2025-12-20
+
+### Added
+
+- Support `T61String`
+
+### Fixed
+
+- Add i128 suffix to generated unbounded Integer
+
+### Other
+
+- Add `BY` and `DEFINED` to reserved words
+- Parse `ANY [DEFINED BY identifier]`
+
+## [0.14.0](https://github.com/librasn/compiler/compare/rasn-compiler-v0.13.0...rasn-compiler-v0.14.0) - 2025-07-17
+
+### Added
+
+- *(rasn-generator)* add support for OID composition
+
+### Other
+
+- Merge pull request #139 from Rawk/no-opt-vec
+- Document and renames to better follow specification
+
+## [0.13.0](https://github.com/librasn/compiler/compare/rasn-compiler-v0.12.0...rasn-compiler-v0.13.0) - 2025-07-10
+
+### Added
+
+- RasnCompiler and TsCompiler type alias
+
+### Other
+
+- Move cli.rs into bin.rs
+- Do not specify crate-type for rasn-compiler
+- Add type_reference and module_reference parsers
+- Rename value_identifier parser to value_reference
+- Rename InformationObjectFieldReference to ObjectClassFieldType
+- Rename ModuleReference to ModuleHeader
+- Rename InformationObjectClass to ObjectClassDefn
+
+## [0.12.0](https://github.com/librasn/compiler/compare/rasn-compiler-v0.11.0...rasn-compiler-v0.12.0) - 2025-06-30
+
+### Other
+
+- Use a tri-state for InformationObjectClassField optionality
+- Upgrade nom to version 8
+- *(README)* specify REAL support
 
 ## [0.11.0](https://github.com/librasn/compiler/compare/rasn-compiler-v0.10.3...rasn-compiler-v0.11.0) - 2025-06-24
 

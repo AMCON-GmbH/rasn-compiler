@@ -2,14 +2,37 @@ use crate::lexer::asn1_value;
 
 use super::{constraints::*, *};
 
+/// This is either a X.681 ObjectClassAssignment or a X.683 ParameterizedObjectClassAssignment.
+///
+/// **X.681 9.1** _The construct "ObjectClassAssignment" is used to assign an information object
+/// class to a reference name ("objectclassreference"). This construct is one of the alternatives
+/// for "Assignment" in Rec. ITU-T X.680 | ISO/IEC 8824-1, clause 13._
+///
+/// **X.683 9.2** _Referencing parameterized definitions: ParameterizedObjectClassAssignment._
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectClassAssignment {
+    pub comments: String,
+    /// A objectclassreference.
+    pub name: String,
+    pub parameterization: Parameterization,
+    pub definition: ObjectClassDefn,
+    pub module_header: Option<Rc<RefCell<ModuleHeader>>>,
+}
+
+impl ObjectClassAssignment {
+    pub(crate) fn is_parameterized(&self) -> bool {
+        !self.parameterization.parameters.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToplevelInformationDefinition {
     pub comments: String,
     pub name: String,
     pub parameterization: Option<Parameterization>,
-    pub class: Option<ClassLink>,
+    pub class: ClassLink,
     pub value: ASN1Information,
-    pub index: Option<(Rc<RefCell<ModuleReference>>, usize)>,
+    pub module_header: Option<Rc<RefCell<ModuleHeader>>>,
 }
 
 impl From<(&str, ASN1Information, &str)> for ToplevelInformationDefinition {
@@ -18,9 +41,9 @@ impl From<(&str, ASN1Information, &str)> for ToplevelInformationDefinition {
             comments: String::new(),
             name: value.0.to_owned(),
             parameterization: None,
-            class: Some(ClassLink::ByName(value.2.to_owned())),
+            class: ClassLink::ByName(value.2.to_owned()),
             value: value.1,
-            index: None,
+            module_header: None,
         }
     }
 }
@@ -30,7 +53,7 @@ impl From<(&str, ASN1Information, &str)> for ToplevelInformationDefinition {
 #[derive(Clone, PartialEq)]
 pub enum ClassLink {
     ByName(String),
-    ByReference(InformationObjectClass),
+    ByReference(ObjectClassDefn),
 }
 
 impl ToplevelInformationDefinition {
@@ -60,13 +83,13 @@ impl
         Self {
             comments: value.0.join("\n"),
             name: value.1.into(),
-            class: Some(ClassLink::ByName(value.3.into())),
+            class: ClassLink::ByName(value.3.into()),
             parameterization: value.2,
             value: ASN1Information::Object(InformationObject {
                 class_name: value.3.into(),
                 fields: value.4,
             }),
-            index: None,
+            module_header: None,
         }
     }
 }
@@ -79,36 +102,9 @@ impl From<(Vec<&str>, &str, Option<Parameterization>, &str, ObjectSet)>
             comments: value.0.join("\n"),
             name: value.1.into(),
             parameterization: value.2,
-            class: Some(ClassLink::ByName(value.3.into())),
+            class: ClassLink::ByName(value.3.into()),
             value: ASN1Information::ObjectSet(value.4),
-            index: None,
-        }
-    }
-}
-
-impl
-    From<(
-        Vec<&str>,
-        &str,
-        Option<Parameterization>,
-        InformationObjectClass,
-    )> for ToplevelInformationDefinition
-{
-    fn from(
-        value: (
-            Vec<&str>,
-            &str,
-            Option<Parameterization>,
-            InformationObjectClass,
-        ),
-    ) -> Self {
-        Self {
-            comments: value.0.join("\n"),
-            name: value.1.into(),
-            parameterization: value.2,
-            class: None,
-            value: ASN1Information::ObjectClass(value.3),
-            index: None,
+            module_header: None,
         }
     }
 }
@@ -118,7 +114,6 @@ impl
 #[cfg_attr(not(test), derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub enum ASN1Information {
-    ObjectClass(InformationObjectClass),
     ObjectSet(ObjectSet),
     Object(InformationObject),
 }
@@ -214,6 +209,7 @@ impl SyntaxApplication {
         match self {
             SyntaxApplication::ObjectSetDeclaration(_) => None,
             SyntaxApplication::ValueReference(ASN1Value::ElsewhereDeclaredValue {
+                module: None,
                 parent: None,
                 identifier,
             })
@@ -313,9 +309,15 @@ impl InformationObjectSyntax {
     }
 }
 
+/// X.681 9.3  Every class is ultimately defined by an "ObjectClassDefn".
+///
+/// Allows the definer to provide the field specifications, and optionally a syntax list. The
+/// definer may also specify semantics associated with the definition of the class.
 #[derive(Debug, Clone, PartialEq)]
-pub struct InformationObjectClass {
+pub struct ObjectClassDefn {
+    /// Named field specifications, as defined in 9.4.
     pub fields: Vec<InformationObjectClassField>,
+    /// An information object definition syntax ("SyntaxList"), as defined in 10.5.
     pub syntax: Option<InformationObjectSyntax>,
 }
 
@@ -323,7 +325,7 @@ impl
     From<(
         Vec<InformationObjectClassField>,
         Option<Vec<SyntaxExpression>>,
-    )> for InformationObjectClass
+    )> for ObjectClassDefn
 {
     fn from(
         value: (
@@ -344,8 +346,7 @@ impl
 pub struct InformationObjectClassField {
     pub identifier: ObjectFieldIdentifier,
     pub ty: Option<ASN1Type>,
-    pub is_optional: bool,
-    pub default: Option<ASN1Value>,
+    pub optionality: Optionality<ASN1Value>,
     pub is_unique: bool,
 }
 
@@ -354,8 +355,7 @@ impl
         ObjectFieldIdentifier,
         Option<ASN1Type>,
         Option<&str>,
-        Option<OptionalMarker>,
-        Option<ASN1Value>,
+        Optionality<ASN1Value>,
     )> for InformationObjectClassField
 {
     fn from(
@@ -363,16 +363,14 @@ impl
             ObjectFieldIdentifier,
             Option<ASN1Type>,
             Option<&str>,
-            Option<OptionalMarker>,
-            Option<ASN1Value>,
+            Optionality<ASN1Value>,
         ),
     ) -> Self {
         Self {
             identifier: value.0,
             ty: value.1,
             is_unique: value.2.is_some(),
-            is_optional: value.3.is_some() || value.4.is_some(),
-            default: value.4,
+            optionality: value.3,
         }
     }
 }
@@ -522,14 +520,17 @@ impl From<(ObjectFieldIdentifier, ObjectSet)> for InformationObjectField {
     }
 }
 
+/// #### X.681 14 Notation for the object class field type
+/// _The type that is referenced by this notation depends on the category of the field name. For
+/// the different categories of field names, 14.2 to 14.5 specify the type that is referenced._
 #[derive(Debug, Clone, PartialEq)]
-pub struct InformationObjectFieldReference {
+pub struct ObjectClassFieldType {
     pub class: String,
     pub field_path: Vec<ObjectFieldIdentifier>,
     pub constraints: Vec<Constraint>,
 }
 
-impl InformationObjectFieldReference {
+impl ObjectClassFieldType {
     /// Returns the field path as string.
     /// The field path is stringified by joining
     /// the stringified `ObjectFieldIdentifier`s with
@@ -543,9 +544,7 @@ impl InformationObjectFieldReference {
     }
 }
 
-impl From<(&str, Vec<ObjectFieldIdentifier>, Option<Vec<Constraint>>)>
-    for InformationObjectFieldReference
-{
+impl From<(&str, Vec<ObjectFieldIdentifier>, Option<Vec<Constraint>>)> for ObjectClassFieldType {
     fn from(value: (&str, Vec<ObjectFieldIdentifier>, Option<Vec<Constraint>>)) -> Self {
         Self {
             class: value.0.into(),

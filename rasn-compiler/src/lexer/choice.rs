@@ -4,7 +4,7 @@ use nom::{
     character::complete::char,
     combinator::{into, opt},
     multi::many0,
-    sequence::{separated_pair, terminated, tuple},
+    sequence::{separated_pair, terminated},
 };
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
     intermediate::{types::*, *},
 };
 
-use super::{constraint::constraint, error::ParserResult, *};
+use super::{constraint::constraints, error::ParserResult, *};
 
 pub fn choice_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
     map(
@@ -22,7 +22,8 @@ pub fn choice_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
             variant_name: id.to_owned(),
             inner_value: Box::new(val),
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Tries to parse the named alternative an ASN1 CHOICE
@@ -48,12 +49,13 @@ pub fn choice_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
 pub fn selection_type_choice(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
     map(
         into(separated_pair(
-            skip_ws_and_comments(value_identifier),
+            skip_ws_and_comments(value_reference),
             skip_ws_and_comments(char(LEFT_CHEVRON)),
-            skip_ws_and_comments(title_case_identifier),
+            skip_ws_and_comments(type_reference),
         )),
         ASN1Type::ChoiceSelectionType,
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Tries to parse an ASN1 CHOICE
@@ -70,7 +72,7 @@ pub fn choice(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
     map(
         preceded(
             skip_ws_and_comments(tag(CHOICE)),
-            in_braces(tuple((
+            in_braces((
                 many0(terminated(
                     skip_ws_and_comments(choice_option),
                     optional_comma,
@@ -95,19 +97,21 @@ pub fn choice(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
                     ))),
                     |extensions| extensions.into_iter().flatten().collect(),
                 )),
-            ))),
+            )),
         ),
         |m| ASN1Type::Choice(m.into()),
-    )(input)
+    )
+    .parse(input)
 }
 
 fn choice_option(input: Input<'_>) -> ParserResult<'_, ChoiceOption> {
-    into(tuple((
+    into((
         skip_ws_and_comments(identifier),
         opt(asn_tag),
         skip_ws_and_comments(asn1_type),
-        opt(skip_ws_and_comments(constraint)),
-    )))(input)
+        opt(skip_ws_and_comments(constraints)),
+    ))
+    .parse(input)
 }
 
 #[cfg(test)]
@@ -190,6 +194,7 @@ mod tests {
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "GeographicLocationContainer".into(),
                             constraints: vec![],
                         },),
@@ -201,6 +206,7 @@ mod tests {
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "AutomatedVehicleContainer".into(),
                             constraints: vec![],
                         },),
@@ -212,6 +218,7 @@ mod tests {
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "RoadSurfaceContainer".into(),
                             constraints: vec![],
                         },),
@@ -223,6 +230,7 @@ mod tests {
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "InfrastructureSupportContainer".into(),
                             constraints: vec![],
                         },),

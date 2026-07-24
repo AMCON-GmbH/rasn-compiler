@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 use crate::intermediate::{
     constraints::Constraint,
     information_object::{
-        ASN1Information, ClassLink, InformationObjectClass, InformationObjectFields,
-        ObjectSetValue, ToplevelInformationDefinition,
+        ASN1Information, ClassLink, InformationObjectFields, ObjectClassDefn, ObjectSetValue,
+        ToplevelInformationDefinition,
     },
-    ASN1Type, ASN1Value, CharacterStringType, ToplevelDefinition, ToplevelTypeDefinition,
-    ToplevelValueDefinition,
+    types::Optionality,
+    ASN1Type, ASN1Value, AsnTag, ToplevelDefinition, ToplevelTypeDefinition, ToplevelValueDefinition,
 };
 
 use super::{
@@ -23,7 +23,7 @@ pub(crate) const INNER_ARRAY_LIKE_PREFIX: &str = "Anonymous_";
 macro_rules! call_template {
     ($this:ident, $fn:ident, $tld:ident, $($args:expr),*) => {
         Ok($fn(
-            $this.format_comments(&$tld.comments)?,
+            $this.format_comments(&$tld.comments),
             $this.to_rust_const_case(&$tld.name),
             $($args),*
         ))
@@ -44,53 +44,57 @@ impl Rasn {
         tld: ToplevelDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         match tld {
-            ToplevelDefinition::Type(t) => {
-                if t.parameterization.is_some() {
-                    return Ok(TokenStream::new());
-                }
-                match t.ty {
-                    ASN1Type::Null => self.generate_null(t),
-                    ASN1Type::Boolean(_) => self.generate_boolean(t),
-                    ASN1Type::Integer(_) => self.generate_integer(t),
-                    ASN1Type::Enumerated(_) => self.generate_enumerated(t),
-                    ASN1Type::BitString(_) => self.generate_bit_string(t),
-                    ASN1Type::CharacterString(_) => self.generate_character_string(t),
-                    ASN1Type::Sequence(_) | ASN1Type::Set(_) => self.generate_sequence_or_set(t),
-                    ASN1Type::SequenceOf(_) | ASN1Type::SetOf(_) => {
-                        self.generate_sequence_or_set_of(t)
-                    }
-                    ASN1Type::ElsewhereDeclaredType(_) => self.generate_typealias(t),
-                    ASN1Type::Choice(_) => self.generate_choice(t),
-                    ASN1Type::OctetString(_) => self.generate_octet_string(t),
-                    ASN1Type::Time(_) => unimplemented!("rasn does not support TIME types yet!"),
-                    ASN1Type::Real(_) => Err(GeneratorError {
-                        kind: GeneratorErrorType::NotYetInplemented,
-                        details: "Real types are currently unsupported!".into(),
-                        top_level_declaration: None,
-                    }),
-                    ASN1Type::ObjectIdentifier(_) => self.generate_oid(t),
-                    ASN1Type::InformationObjectFieldReference(_)
-                    | ASN1Type::EmbeddedPdv
-                    | ASN1Type::External => self.generate_any(t),
-                    ASN1Type::GeneralizedTime(_) => self.generate_generalized_time(t),
-                    ASN1Type::UTCTime(_) => self.generate_utc_time(t),
-                    ASN1Type::ChoiceSelectionType(_) => Err(GeneratorError {
-                        kind: GeneratorErrorType::Asn1TypeMismatch,
-                        details: "Choice selection type should have been resolved at this point!"
-                            .into(),
-                        top_level_declaration: None,
-                    }),
-                }
-            }
+            ToplevelDefinition::Type(t) => self.generate_type(t),
             ToplevelDefinition::Value(v) => self.generate_value(v),
-            ToplevelDefinition::Information(i) => match i.value {
-                ASN1Information::ObjectSet(_) => self.generate_information_object_set(i),
-                _ => Ok(TokenStream::new()),
+            ToplevelDefinition::Class(_) => Ok(TokenStream::new()),
+            ToplevelDefinition::Object(o) => match o.value {
+                ASN1Information::ObjectSet(_) => self.generate_information_object_set(o),
+                ASN1Information::Object(_) => Ok(TokenStream::new()),
             },
             ToplevelDefinition::Macro(_) => Err(GeneratorError {
                 kind: GeneratorErrorType::NotYetInplemented,
                 details: "MACROs are currently unsupported!".to_string(),
-                top_level_declaration: Some(tld),
+                top_level_declaration: Some(Box::new(tld)),
+            }),
+        }
+    }
+
+    pub(crate) fn generate_type(
+        &self,
+        tld: ToplevelTypeDefinition,
+    ) -> Result<TokenStream, GeneratorError> {
+        if tld.parameterization.is_some() {
+            return Ok(TokenStream::new());
+        }
+        match tld.ty {
+            ASN1Type::Null => self.generate_null(tld),
+            ASN1Type::Boolean(_) => self.generate_boolean(tld),
+            ASN1Type::Integer(_) => self.generate_integer(tld),
+            ASN1Type::Enumerated(_) => self.generate_enumerated(tld),
+            ASN1Type::BitString(_) => self.generate_bit_string(tld),
+            ASN1Type::CharacterString(_) => self.generate_character_string(tld),
+            ASN1Type::Sequence(_) | ASN1Type::Set(_) => self.generate_sequence_or_set(tld),
+            ASN1Type::SequenceOf(_) | ASN1Type::SetOf(_) => self.generate_sequence_or_set_of(tld),
+            ASN1Type::ElsewhereDeclaredType(_) => self.generate_typealias(tld),
+            ASN1Type::Choice(_) => self.generate_choice(tld),
+            ASN1Type::OctetString(_) => self.generate_octet_string(tld),
+            ASN1Type::Time(_) => unimplemented!("rasn does not support TIME types yet!"),
+            ASN1Type::Real(_) => Err(GeneratorError {
+                kind: GeneratorErrorType::NotYetInplemented,
+                details: "Real types are currently unsupported!".into(),
+                top_level_declaration: None,
+            }),
+            ASN1Type::ObjectIdentifier(_) => self.generate_oid(tld),
+            ASN1Type::ObjectClassField(_) | ASN1Type::EmbeddedPdv | ASN1Type::External => {
+                self.generate_any(tld)
+            }
+            ASN1Type::GeneralizedTime(_) => self.generate_generalized_time(tld),
+            ASN1Type::UTCTime(_) => self.generate_utc_time(tld),
+            ASN1Type::Any => self.generate_any(tld),
+            ASN1Type::ChoiceSelectionType(_) => Err(GeneratorError {
+                kind: GeneratorErrorType::Asn1TypeMismatch,
+                details: "Choice selection type should have been resolved at this point!".into(),
+                top_level_declaration: None,
             }),
         }
     }
@@ -100,12 +104,13 @@ impl Rasn {
         tld: ToplevelTypeDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::ElsewhereDeclaredType(dec) = &tld.ty {
-            let (name, mut annotations) = self.format_name_and_common_annotations(&tld)?;
+            let (name, mut annotations) = self.format_name_and_common_annotations(&tld);
             annotations.push(self.format_range_annotations(true, &dec.constraints)?);
+            let alias = self.to_rust_qualified_type(dec.module.as_deref(), &dec.identifier);
             Ok(typealias_template(
-                self.format_comments(&tld.comments)?,
+                self.format_comments(&tld.comments),
                 name,
-                self.to_rust_title_case(&dec.identifier),
+                alias,
                 self.join_annotations(annotations, false, true)?,
             ))
         } else {
@@ -127,14 +132,15 @@ impl Rasn {
             };
             if integer_type.is_unbounded() {
                 Ok(lazy_static_value_template(
-                    self.format_comments(&tld.comments)?,
+                    self.format_comments(&tld.comments),
                     self.to_rust_const_case(&tld.name),
                     ty,
                     val,
+                    self.config.no_std_compliant_bindings,
                 ))
             } else {
                 Ok(integer_value_template(
-                    self.format_comments(&tld.comments)?,
+                    self.format_comments(&tld.comments),
                     self.to_rust_const_case(&tld.name),
                     ty,
                     val,
@@ -154,10 +160,10 @@ impl Rasn {
         tld: ToplevelTypeDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::Integer(ref int) = tld.ty {
-            let (name, mut annotations) = self.format_name_and_common_annotations(&tld)?;
+            let (name, mut annotations) = self.format_name_and_common_annotations(&tld);
             annotations.push(self.format_range_annotations(true, &int.constraints)?);
             Ok(integer_template(
-                self.format_comments(&tld.comments)?,
+                self.format_comments(&tld.comments),
                 name,
                 self.join_annotations(annotations, false, true)?,
                 int.int_type().to_token_stream(),
@@ -172,20 +178,20 @@ impl Rasn {
         tld: ToplevelTypeDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::BitString(ref bitstr) = tld.ty {
-            let (name, mut annotations) = self.format_name_and_common_annotations(&tld)?;
+            let (name, mut annotations) = self.format_name_and_common_annotations(&tld);
             if bitstr.fixed_size().is_none() {
                 annotations.push(self.format_range_annotations(true, &bitstr.constraints)?);
             }
             if let Some(size) = bitstr.fixed_size() {
                 Ok(fixed_bit_string_template(
-                    self.format_comments(&tld.comments)?,
+                    self.format_comments(&tld.comments),
                     name,
                     self.join_annotations(annotations, false, true)?,
                     size.to_token_stream(),
                 ))
             } else {
                 Ok(bit_string_template(
-                    self.format_comments(&tld.comments)?,
+                    self.format_comments(&tld.comments),
                     name,
                     self.join_annotations(annotations, false, true)?,
                 ))
@@ -200,20 +206,20 @@ impl Rasn {
         tld: ToplevelTypeDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::OctetString(ref oct_str) = tld.ty {
-            let (name, mut annotations) = self.format_name_and_common_annotations(&tld)?;
+            let (name, mut annotations) = self.format_name_and_common_annotations(&tld);
             if oct_str.fixed_size().is_none() {
                 annotations.push(self.format_range_annotations(true, &oct_str.constraints)?);
             }
             if let Some(size) = oct_str.fixed_size() {
                 Ok(fixed_octet_string_template(
-                    self.format_comments(&tld.comments)?,
+                    self.format_comments(&tld.comments),
                     name,
                     self.join_annotations(annotations, false, true)?,
                     size.to_token_stream(),
                 ))
             } else {
                 Ok(octet_string_template(
-                    self.format_comments(&tld.comments)?,
+                    self.format_comments(&tld.comments),
                     name,
                     self.join_annotations(annotations, false, true)?,
                 ))
@@ -228,15 +234,15 @@ impl Rasn {
         tld: ToplevelTypeDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::CharacterString(ref char_str) = tld.ty {
-            let (name, mut annotations) = self.format_name_and_common_annotations(&tld)?;
+            let (name, mut annotations) = self.format_name_and_common_annotations(&tld);
             annotations.extend([
                 self.format_range_annotations(true, &char_str.constraints)?,
                 self.format_alphabet_annotations(char_str.ty, &char_str.constraints)?,
             ]);
             Ok(char_string_template(
-                self.format_comments(&tld.comments)?,
+                self.format_comments(&tld.comments),
                 name,
-                self.string_type(&char_str.ty)?,
+                self.string_type(char_str.ty)?,
                 self.join_annotations(annotations, false, true)?,
             ))
         } else {
@@ -249,10 +255,10 @@ impl Rasn {
         tld: ToplevelTypeDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         // TODO: process boolean constraints
-        let (name, annotations) = self.format_name_and_common_annotations(&tld)?;
+        let (name, annotations) = self.format_name_and_common_annotations(&tld);
         if let ASN1Type::Boolean(_) = tld.ty {
             Ok(boolean_template(
-                self.format_comments(&tld.comments)?,
+                self.format_comments(&tld.comments),
                 name,
                 self.join_annotations(annotations, true, true)?,
             ))
@@ -299,14 +305,16 @@ impl Rasn {
                 lazy_static_value_template,
                 tld,
                 quote!(BitString),
-                self.value_to_tokens(&tld.value, None)?
+                self.value_to_tokens(&tld.value, None)?,
+                self.config.no_std_compliant_bindings
             ),
             ASN1Value::OctetString(_) if ty.is_builtin_type() => call_template!(
                 self,
                 lazy_static_value_template,
                 tld,
                 quote!(OctetString),
-                self.value_to_tokens(&tld.value, None)?
+                self.value_to_tokens(&tld.value, None)?,
+                self.config.no_std_compliant_bindings
             ),
             ASN1Value::Choice {
                 variant_name,
@@ -329,7 +337,8 @@ impl Rasn {
                         tld,
                         self.to_rust_title_case(&ty.as_str()),
                         self.to_rust_enum_identifier(variant_name),
-                        self.value_to_tokens(inner_value, None)?
+                        self.value_to_tokens(inner_value, None)?,
+                        self.config.no_std_compliant_bindings
                     )
                 }
             }
@@ -349,14 +358,16 @@ impl Rasn {
                     lazy_static_value_template,
                     tld,
                     quote!(GeneralizedTime),
-                    self.value_to_tokens(&tld.value, Some(&quote!(GeneralizedTime)))?
+                    self.value_to_tokens(&tld.value, Some(&quote!(GeneralizedTime)))?,
+                    self.config.no_std_compliant_bindings
                 ),
                 ASN1Type::UTCTime(_) => call_template!(
                     self,
                     lazy_static_value_template,
                     tld,
                     quote!(UtcTime),
-                    self.value_to_tokens(&tld.value, Some(&quote!(UtcTime)))?
+                    self.value_to_tokens(&tld.value, Some(&quote!(UtcTime)))?,
+                    self.config.no_std_compliant_bindings
                 ),
                 _ => Err(GeneratorError::new(
                     Some(ToplevelDefinition::Value(tld)),
@@ -376,7 +387,8 @@ impl Rasn {
                     sequence_or_set_value_template,
                     tld,
                     self.to_rust_title_case(&ty.as_str()),
-                    quote!(#(#members),*)
+                    quote!(#(#members),*),
+                    self.config.no_std_compliant_bindings
                 )
             }
             ASN1Value::LinkedNestedValue { supertypes, value } => {
@@ -403,7 +415,8 @@ impl Rasn {
                             self,
                             &ty.as_str(),
                             self.value_to_tokens(&tld.value, parent.as_ref())?
-                        )
+                        ),
+                        self.config.no_std_compliant_bindings
                     )
                 }
             }
@@ -412,34 +425,18 @@ impl Rasn {
                 lazy_static_value_template,
                 tld,
                 quote!(ObjectIdentifier),
-                self.value_to_tokens(&tld.value, None)?
+                self.value_to_tokens(&tld.value, None)?,
+                self.config.no_std_compliant_bindings
             ),
             ASN1Value::LinkedCharStringValue(cs_ty, _) if ty.is_builtin_type() => {
-                let ty_ts = match cs_ty {
-                    CharacterStringType::NumericString => quote!(NumericString),
-                    CharacterStringType::VisibleString => quote!(VisibleString),
-                    CharacterStringType::IA5String => quote!(IA5String),
-                    CharacterStringType::UTF8String => quote!(UTF8String),
-                    CharacterStringType::BMPString => quote!(BMPString),
-                    CharacterStringType::PrintableString => quote!(PrintableString),
-                    CharacterStringType::GeneralString => quote!(GeneralString),
-                    CharacterStringType::GraphicString => quote!(GraphicString),
-                    CharacterStringType::TeletexString
-                    | CharacterStringType::VideotexString
-                    | CharacterStringType::UniversalString => {
-                        return Err(GeneratorError::new(
-                            None,
-                            &format!("{:?} values are currently unsupported", cs_ty),
-                            GeneratorErrorType::NotYetInplemented,
-                        ))
-                    }
-                };
+                let ty_ts = self.string_type(*cs_ty)?;
                 call_template!(
                     self,
                     lazy_static_value_template,
                     tld,
                     ty_ts,
-                    self.value_to_tokens(&tld.value, None)?
+                    self.value_to_tokens(&tld.value, None)?,
+                    self.config.no_std_compliant_bindings
                 )
             }
             ASN1Value::LinkedArrayLikeValue(s) if ty.is_builtin_type() => {
@@ -462,7 +459,8 @@ impl Rasn {
                     lazy_static_value_template,
                     tld,
                     quote!(Vec<#item_type>),
-                    self.value_to_tokens(&tld.value, None)?
+                    self.value_to_tokens(&tld.value, None)?,
+                    self.config.no_std_compliant_bindings
                 )
             }
             ASN1Value::BitString(_)
@@ -476,7 +474,8 @@ impl Rasn {
                 lazy_static_value_template,
                 tld,
                 self.to_rust_title_case(&ty.as_str()),
-                assignment!(self, &ty.as_str(), self.value_to_tokens(&tld.value, None)?)
+                assignment!(self, &ty.as_str(), self.value_to_tokens(&tld.value, None)?),
+                self.config.no_std_compliant_bindings
             ),
             _ => Ok(TokenStream::new()),
         }
@@ -487,12 +486,12 @@ impl Rasn {
         tld: ToplevelTypeDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         let name = self.to_rust_title_case(&tld.name);
-        let mut annotations = vec![quote!(delegate), self.format_tag(tld.tag.as_ref(), false)];
+        let mut annotations = vec![quote!(delegate), self.format_tag(tld.tag.as_ref())];
         if name.to_string() != tld.name {
             annotations.push(self.format_identifier_annotation(&tld.name, &tld.comments, &tld.ty));
         }
         Ok(any_template(
-            self.format_comments(&tld.comments)?,
+            self.format_comments(&tld.comments),
             name,
             self.join_annotations(annotations, false, true)?,
         ))
@@ -503,9 +502,9 @@ impl Rasn {
         tld: ToplevelTypeDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::GeneralizedTime(_) = &tld.ty {
-            let (name, annotations) = self.format_name_and_common_annotations(&tld)?;
+            let (name, annotations) = self.format_name_and_common_annotations(&tld);
             Ok(generalized_time_template(
-                self.format_comments(&tld.comments)?,
+                self.format_comments(&tld.comments),
                 name,
                 self.join_annotations(annotations, false, true)?,
             ))
@@ -519,9 +518,9 @@ impl Rasn {
         tld: ToplevelTypeDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::UTCTime(_) = &tld.ty {
-            let (name, annotations) = self.format_name_and_common_annotations(&tld)?;
+            let (name, annotations) = self.format_name_and_common_annotations(&tld);
             Ok(utc_time_template(
-                self.format_comments(&tld.comments)?,
+                self.format_comments(&tld.comments),
                 name,
                 self.join_annotations(annotations, false, true)?,
             ))
@@ -535,10 +534,10 @@ impl Rasn {
         tld: ToplevelTypeDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::ObjectIdentifier(oid) = &tld.ty {
-            let (name, mut annotations) = self.format_name_and_common_annotations(&tld)?;
+            let (name, mut annotations) = self.format_name_and_common_annotations(&tld);
             annotations.push(self.format_range_annotations(false, &oid.constraints)?);
             Ok(oid_template(
-                self.format_comments(&tld.comments)?,
+                self.format_comments(&tld.comments),
                 name,
                 self.join_annotations(annotations, false, true)?,
             ))
@@ -552,9 +551,9 @@ impl Rasn {
         tld: ToplevelTypeDefinition,
     ) -> Result<TokenStream, GeneratorError> {
         if let ASN1Type::Null = tld.ty {
-            let (name, annotations) = self.format_name_and_common_annotations(&tld)?;
+            let (name, annotations) = self.format_name_and_common_annotations(&tld);
             Ok(null_template(
-                self.format_comments(&tld.comments)?,
+                self.format_comments(&tld.comments),
                 name,
                 self.join_annotations(annotations, true, true)?,
             ))
@@ -580,8 +579,7 @@ impl Rasn {
                 })
                 .unwrap_or_default();
             let name = self.to_rust_title_case(&tld.name);
-            let mut annotations =
-                vec![quote!(enumerated), self.format_tag(tld.tag.as_ref(), false)];
+            let mut annotations = vec![quote!(enumerated), self.format_tag(tld.tag.as_ref())];
             if name.to_string() != tld.name {
                 annotations.push(self.format_identifier_annotation(
                     &tld.name,
@@ -590,7 +588,7 @@ impl Rasn {
                 ));
             }
             Ok(enumerated_template(
-                self.format_comments(&tld.comments)?,
+                self.format_comments(&tld.comments),
                 name,
                 extensible,
                 self.format_enum_members(enumerated)?,
@@ -618,14 +616,29 @@ impl Rasn {
                     #[non_exhaustive]}
                 })
                 .unwrap_or_default();
-            let mut annotations = vec![
-                quote!(choice),
-                self.format_tag(
-                    tld.tag.as_ref(),
-                    self.tagging_environment == TaggingEnvironment::Automatic
-                        && !choice.options.iter().any(|o| o.tag.is_some()),
-                ),
-            ];
+            let mut annotations = vec![quote!(choice)];
+
+            // ITU-T X.680 section 31.2.7 clause c:
+            // use explicit tagging in IMPLICIT or AUTOMATIC tagging envirnonments when untagged choice is tagged
+            if let Some(tag) = &tld.tag {
+                if self.tagging_environment != TaggingEnvironment::Explicit {
+                    let explicit_tag = AsnTag {
+                        environment: TaggingEnvironment::Explicit,
+                        ..tag.clone()
+                    };
+                    annotations.push(self.format_tag(Some(&explicit_tag)));
+                } else {
+                    annotations.push(self.format_tag(tld.tag.as_ref()));
+                }
+            }
+
+            // ITU-T X.680 clause 29.2: enable automatic tagging if none of the members are tagged type
+            if self.tagging_environment == TaggingEnvironment::Automatic
+                && !choice.options.iter().any(|o| o.tag.is_some())
+            {
+                annotations.push(quote!(automatic_tags));
+            }
+
             if name.to_string() != tld.name {
                 annotations.push(self.format_identifier_annotation(
                     &tld.name,
@@ -635,7 +648,7 @@ impl Rasn {
             }
             let formatted_options = self.format_choice_options(choice, &name.to_string())?;
             let choice_str = choice_template(
-                self.format_comments(&tld.comments)?,
+                self.format_comments(&tld.comments),
                 &name,
                 extensible,
                 formatted_options.enum_body,
@@ -708,14 +721,8 @@ impl Rasn {
                     seq.members.iter().fold(
                     TokenStream::new(),
                     |mut acc, m| {
-                        [
-                            m.constraints.clone(),
-                            m.ty.constraints().map_or(vec![], |c| c.to_vec())
-                        ]
-                        .concat()
-                        .iter()
-                        .for_each(|c| {
-                            if let (Constraint::TableConstraint(t), ASN1Type::InformationObjectFieldReference(iofr)) = (c, &m.ty) {
+                        m.constraints.iter().chain(m.ty.constraints()).for_each(|c| {
+                            if let (Constraint::Table(t), ASN1Type::ObjectClassField(iofr)) = (c, &m.ty) {
                                 let decode_fn = format_ident!("decode_{}", self.to_rust_snake_case(&m.name));
                                 let open_field_name = self.to_rust_snake_case(&m.name);
                                 let identifier = t.linked_fields.iter().map(|l|
@@ -731,7 +738,11 @@ impl Rasn {
                                     _ => todo!()
                                 };
                                 let field_enum_name = format_ident!("{obj_set_name}_{field_name}");
-                                let input = m.is_optional.then(|| quote!(self. #open_field_name .as_ref())).unwrap_or(quote!(Some(&self. #open_field_name)));
+                                let input = if m.optionality == Optionality::Required {
+                                    quote!(Some(&self. #open_field_name))
+                                } else {
+                                    quote!(self. #open_field_name .as_ref())
+                                };
                                 acc.append_all(quote! {
 
                                     impl #name {
@@ -747,14 +758,15 @@ impl Rasn {
                 };
                 let formatted_members =
                     self.format_sequence_or_set_members(seq, &name.to_string())?;
-                let mut annotations = vec![
-                    set_annotation,
-                    self.format_tag(
-                        tld.tag.as_ref(),
-                        self.tagging_environment == TaggingEnvironment::Automatic
-                            && !seq.members.iter().any(|m| m.tag.is_some()),
-                    ),
-                ];
+                let mut annotations = vec![set_annotation, self.format_tag(tld.tag.as_ref())];
+
+                // ITU-T X.680 clause 25.3: enable automatic tagging if none of the members are tagged type
+                if self.tagging_environment == TaggingEnvironment::Automatic
+                    && !seq.members.iter().any(|m| m.tag.is_some())
+                {
+                    annotations.push(quote!(automatic_tags));
+                }
+
                 if name.to_string() != tld.name {
                     annotations.push(self.format_identifier_annotation(
                         &tld.name,
@@ -763,7 +775,7 @@ impl Rasn {
                     ));
                 }
                 Ok(sequence_or_set_template(
-                    self.format_comments(&tld.comments)?,
+                    self.format_comments(&tld.comments),
                     name.clone(),
                     extensible,
                     formatted_members.struct_body,
@@ -771,6 +783,7 @@ impl Rasn {
                     self.join_annotations(annotations, false, true)?,
                     self.format_default_methods(&seq.members, &name.to_string())?,
                     self.format_new_impl(&name, formatted_members.name_types),
+                    self.format_default_impl(&tld.name, &seq.members),
                     class_fields,
                 ))
             }
@@ -796,36 +809,36 @@ impl Rasn {
         let name = self.to_rust_title_case(&tld.name);
         let anonymous_item = match seq_or_set_of.element_type.as_ref() {
             ASN1Type::ElsewhereDeclaredType(_) => None,
-            n => Some(
-                self.generate_tld(ToplevelDefinition::Type(ToplevelTypeDefinition {
-                    parameterization: None,
-                    comments: format!(
-                        " Anonymous {} OF member ",
-                        if is_set_of { "SET" } else { "SEQUENCE" }
-                    ),
-                    name: String::from(INNER_ARRAY_LIKE_PREFIX) + &name.to_string(),
-                    ty: n.clone(),
-                    tag: None,
-                    index: None,
-                }))?,
-            ),
+            n => Some(self.generate_type(ToplevelTypeDefinition {
+                parameterization: None,
+                comments: format!(
+                    " Anonymous {} OF member ",
+                    if is_set_of { "SET" } else { "SEQUENCE" }
+                ),
+                name: String::from(INNER_ARRAY_LIKE_PREFIX) + &name.to_string(),
+                ty: n.clone(),
+                tag: None,
+                module_header: None,
+            })?),
         }
         .unwrap_or_default();
         let member_type = match seq_or_set_of.element_type.as_ref() {
-            ASN1Type::ElsewhereDeclaredType(d) => self.to_rust_title_case(&d.identifier),
+            ASN1Type::ElsewhereDeclaredType(d) => {
+                self.to_rust_qualified_type(d.module.as_deref(), &d.identifier)
+            }
             _ => format_ident!("Anonymous{}", &name.to_string()).to_token_stream(),
         };
         let mut annotations = vec![
             quote!(delegate),
             self.format_range_annotations(true, &seq_or_set_of.constraints)?,
-            self.format_tag(tld.tag.as_ref(), false),
+            self.format_tag(tld.tag.as_ref()),
         ];
         if name.to_string() != tld.name {
             annotations.push(self.format_identifier_annotation(&tld.name, &tld.comments, &tld.ty));
         }
         Ok(sequence_or_set_of_template(
             is_set_of,
-            self.format_comments(&tld.comments)?,
+            self.format_comments(&tld.comments),
             name,
             anonymous_item,
             member_type,
@@ -841,9 +854,9 @@ impl Rasn {
             return Ok(TokenStream::new());
         }
         if let ASN1Information::ObjectSet(o) = &tld.value {
-            let class: &InformationObjectClass = match tld.class {
-                Some(ClassLink::ByReference(ref c)) => c,
-                _ => {
+            let class: &ObjectClassDefn = match tld.class {
+                ClassLink::ByReference(ref c) => c,
+                ClassLink::ByName(_) => {
                     return Err(GeneratorError::new(
                         None,
                         "Missing class link in Information Object Set",
@@ -862,7 +875,7 @@ impl Rasn {
                     )),
                     ObjectSetValue::Inline(InformationObjectFields::CustomSyntax(_)) => {
                         Err(GeneratorError::new(
-                            Some(ToplevelDefinition::Information(tld.clone())),
+                            Some(ToplevelDefinition::Object(tld.clone())),
                             "Unexpectedly encountered unresolved custom syntax!",
                             GeneratorErrorType::MissingClassKey,
                         ))
@@ -880,9 +893,9 @@ impl Rasn {
                         .get(index)
                         .map(|f| f.identifier.identifier())
                         .ok_or_else(|| GeneratorError {
-                            top_level_declaration: Some(ToplevelDefinition::Information(
+                            top_level_declaration: Some(Box::new(ToplevelDefinition::Object(
                                 tld.clone(),
-                            )),
+                            ))),
                             details: "Could not find class field for index.".into(),
                             kind: GeneratorErrorType::SyntaxMismatch,
                         })?;
@@ -961,7 +974,7 @@ impl Rasn {
                         } => self.to_rust_title_case(ref_id),
                         _ => format_ident!("{field_enum_name}_{index}").to_token_stream(),
                     };
-                    if ty.constraints().map_or(true, |c| c.is_empty()) {
+                    if ty.constraints().is_empty() {
                         ids.push((variant_name, type_id, identifier_value));
                         inner_types.push(TokenStream::new());
                     } else {
@@ -977,18 +990,11 @@ impl Rasn {
                             .parse::<TokenStream>()
                             .unwrap();
                         let range_constraints = self
-                            .format_range_annotations(
-                                signed_range,
-                                ty.constraints().unwrap_or(&Vec::<_>::new()),
-                            )
+                            .format_range_annotations(signed_range, ty.constraints())
                             .unwrap();
                         let alphabet_constraints = character_string_type
                             .and_then(|c| {
-                                self.format_alphabet_annotations(
-                                    c,
-                                    ty.constraints().unwrap_or(&Vec::<_>::new()),
-                                )
-                                .ok()
+                                self.format_alphabet_annotations(c, ty.constraints()).ok()
                             })
                             .unwrap_or_default();
                         let annotations = self.join_annotations(
@@ -1062,7 +1068,7 @@ impl Rasn {
             Ok(quote!(#(#field_enums)*))
         } else {
             Err(GeneratorError::new(
-                Some(ToplevelDefinition::Information(tld)),
+                Some(ToplevelDefinition::Object(tld)),
                 "Expected Object Set top-level declaration",
                 GeneratorErrorType::Asn1TypeMismatch,
             ))

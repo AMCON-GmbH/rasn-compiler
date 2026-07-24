@@ -1,14 +1,11 @@
 use nom::{
-    bytes::complete::tag,
-    character::complete::char,
-    combinator::opt,
-    multi::many0,
-    sequence::{terminated, tuple},
+    bytes::complete::tag, character::complete::char, combinator::opt, multi::many0,
+    sequence::terminated,
 };
 
 use crate::intermediate::*;
 
-use super::{common::optional_comma, constraint::constraint, sequence::sequence_component, *};
+use super::{common::optional_comma, constraint::constraints, sequence::sequence_component, *};
 
 /// Tries to parse an ASN1 SET
 ///
@@ -25,7 +22,7 @@ pub fn set(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
         preceded(
             skip_ws_and_comments(tag(SET)),
             pair(
-                in_braces(tuple((
+                in_braces((
                     many0(terminated(
                         skip_ws_and_comments(sequence_component),
                         optional_comma,
@@ -35,17 +32,20 @@ pub fn set(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
                         skip_ws_and_comments(sequence_component),
                         optional_comma,
                     ))),
-                ))),
-                opt(constraint),
+                )),
+                opt(constraints),
             ),
         ),
         |m| ASN1Type::Set(m.into()),
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]
 mod tests {
-    use set::types::{CharacterString, SequenceOrSet, SequenceOrSetMember, SequenceOrSetOf};
+    use set::types::{
+        CharacterString, Optionality, SequenceOrSet, SequenceOrSetMember, SequenceOrSetOf,
+    };
 
     use super::*;
 
@@ -72,8 +72,7 @@ mod tests {
                             constraints: vec![],
                             ty: CharacterStringType::VisibleString
                         }),
-                        default_value: None,
-                        is_optional: false,
+                        optionality: Optionality::Required,
                         constraints: vec![],
                     },
                     SequenceOrSetMember {
@@ -89,8 +88,7 @@ mod tests {
                                 ty: CharacterStringType::VisibleString
                             }))
                         }),
-                        default_value: Some(ASN1Value::SequenceOrSet(vec![])),
-                        is_optional: true,
+                        optionality: Optionality::Default(ASN1Value::SequenceOrSet(vec![])),
                         constraints: vec![]
                     }
                 ]

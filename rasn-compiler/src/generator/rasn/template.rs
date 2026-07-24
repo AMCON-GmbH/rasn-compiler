@@ -31,11 +31,21 @@ pub fn lazy_static_value_template(
     name: Ident,
     vtype: TokenStream,
     value: TokenStream,
+    no_std_compliant: bool,
 ) -> TokenStream {
-    quote! {
-        lazy_static! {
+    if no_std_compliant {
+        quote! {
+            lazy_static! {
+                #comments
+                pub static ref #name: #vtype = #value;
+            }
+        }
+    } else {
+        quote! {
             #comments
-            pub static ref #name: #vtype = #value;
+            pub static #name: LazyLock< #vtype > = LazyLock::new(||
+                #value
+            );
         }
     }
 }
@@ -235,12 +245,24 @@ pub fn sequence_or_set_value_template(
     name: Ident,
     vtype: TokenStream,
     members: TokenStream,
+    no_std_compliant: bool,
 ) -> TokenStream {
-    quote! {
+    if no_std_compliant {
+        quote! {
         lazy_static! {
+                #comments
+                pub static ref #name: #vtype = #vtype ::new(
+                    #members
+                );
+            }
+        }
+    } else {
+        quote! {
             #comments
-            pub static ref #name: #vtype = #vtype ::new(
-                #members
+            pub static #name: LazyLock< #vtype > = LazyLock::new(||
+                #vtype ::new(
+                    #members
+                )
             );
         }
     }
@@ -256,6 +278,7 @@ pub fn sequence_or_set_template(
     annotations: TokenStream,
     default_methods: TokenStream,
     new_impl: TokenStream,
+    default_impl: TokenStream,
     class_fields: TokenStream,
 ) -> TokenStream {
     quote! {
@@ -268,6 +291,8 @@ pub fn sequence_or_set_template(
         }
 
         #new_impl
+
+        #default_impl
 
         #class_fields
 
@@ -300,11 +325,21 @@ pub fn choice_value_template(
     type_id: TokenStream,
     choice_name: Ident,
     inner_decl: TokenStream,
+    no_std_compliant: bool,
 ) -> TokenStream {
-    quote! {
-        lazy_static! {
+    if no_std_compliant {
+        quote! {
+            lazy_static! {
+                #comments
+                pub static ref #name: #type_id = #type_id :: #choice_name (#inner_decl);
+            }
+        }
+    } else {
+        quote! {
             #comments
-            pub static ref #name: #type_id = #type_id :: #choice_name (#inner_decl);
+            pub static #name: LazyLock< #type_id > = LazyLock::new(||
+                #type_id :: #choice_name (#inner_decl)
+            );
         }
     }
 }

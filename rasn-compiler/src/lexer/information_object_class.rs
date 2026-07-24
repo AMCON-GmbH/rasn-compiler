@@ -4,24 +4,63 @@ use nom::{
     character::complete::{alphanumeric1, char, one_of},
     combinator::{into, map, opt, recognize, value},
     multi::{many0, many1, separated_list0, separated_list1},
-    sequence::{pair, preceded, terminated, tuple},
+    sequence::{pair, preceded, terminated},
+    Parser,
 };
 
 use crate::{
-    input::Input,
-    intermediate::{information_object::*, types::ObjectIdentifier, *},
+    input::{context_boundary, Input},
+    intermediate::{
+        information_object::*,
+        types::{ObjectIdentifier, Optionality},
+        ASN1Type, DeclarationElsewhere, AMPERSAND, CLASS, COMMA, DOT, INSTANCE_OF, TYPE_IDENTIFIER,
+        UNIQUE, WITH_SYNTAX,
+    },
+    lexer::{
+        common::{assignment, comment, optionality, skip_ws},
+        parameterization::parameterization,
+    },
 };
 
 use super::{
     asn1_type, asn1_value,
     common::{
-        default, extension_marker, identifier, in_braces, in_brackets, optional_comma,
-        optional_marker, skip_ws_and_comments, uppercase_identifier,
+        extension_marker, identifier, in_braces, in_brackets, optional_comma, skip_ws_and_comments,
+        uppercase_identifier,
     },
-    constraint::constraint,
+    constraint::{constraints, union_mark},
     error::ParserResult,
     into_inner,
 };
+
+/// Parses an ObjectClassAssignment (X.681) or ParameterizedObjectClassAssignment (X.683).
+///
+/// # Syntax
+/// ```text
+/// ObjectClassAssignment ::=
+///     objectclassreference "::=" ObjectClass
+///
+/// ParameterizedObjectClassAssignment ::=
+///     objectclassreference ParameterList "::=" ObjectClass
+/// ```
+pub fn object_class_assignement(input: Input<'_>) -> ParserResult<'_, ObjectClassAssignment> {
+    map(
+        (
+            skip_ws(many0(comment)),
+            skip_ws(context_boundary(uppercase_identifier)),
+            skip_ws(opt(parameterization)),
+            preceded(assignment, alt((type_identifier, object_class_defn))),
+        ),
+        |v| ObjectClassAssignment {
+            comments: v.0.join("\n"),
+            name: v.1.into(),
+            parameterization: v.2.unwrap_or_default(),
+            definition: v.3,
+            module_header: None,
+        },
+    )
+    .parse(input)
+}
 
 /// Tries to parse an ASN1 TYPE-IDENTIFIER
 ///
@@ -37,31 +76,30 @@ use super::{
 /// }
 /// WITH SYNTAX {&Type IDENTIFIED BY &id}
 /// ```
-pub fn type_identifier(input: Input<'_>) -> ParserResult<'_, InformationObjectClass> {
+pub fn type_identifier(input: Input<'_>) -> ParserResult<'_, ObjectClassDefn> {
     skip_ws_and_comments(value(
-        InformationObjectClass {
+        ObjectClassDefn {
             fields: vec![
                 InformationObjectClassField {
                     identifier: ObjectFieldIdentifier::SingleValue("id".into()),
                     ty: Some(ASN1Type::ObjectIdentifier(ObjectIdentifier {
                         constraints: vec![],
                     })),
-                    is_optional: false,
-                    default: None,
+                    optionality: Optionality::Required,
                     is_unique: true,
                 },
                 InformationObjectClassField {
                     identifier: ObjectFieldIdentifier::MultipleValue("Type".into()),
                     ty: None,
-                    is_optional: false,
-                    default: None,
+                    optionality: Optionality::Required,
                     is_unique: false,
                 },
             ],
             syntax: None,
         },
         tag(TYPE_IDENTIFIER),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Tries to parse an ASN1 INSTANCE OF
@@ -77,20 +115,34 @@ pub fn instance_of(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
             tag(INSTANCE_OF),
             pair(
                 skip_ws_and_comments(uppercase_identifier),
-                skip_ws_and_comments(constraint),
+                skip_ws_and_comments(opt(constraints)),
             ),
         ),
         |(id, constraints)| {
             ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                 parent: None,
+                module: None,
                 identifier: id.into(),
-                constraints,
+                constraints: constraints.unwrap_or_default(),
             })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
-pub fn information_object_class(input: Input<'_>) -> ParserResult<'_, InformationObjectClass> {
+/// Parses an ObjectClassDefn.
+///
+/// # Syntax
+///
+/// ```text
+/// ObjectClassDefn ::=
+///     CLASS
+///     "{" FieldSpec "," + "}"
+///     WithSyntaxSpec?
+///
+/// WithSyntaxSpec ::= WITH SYNTAX SyntaxList
+/// ```
+pub fn object_class_defn(input: Input<'_>) -> ParserResult<'_, ObjectClassDefn> {
     into(preceded(
         skip_ws_and_comments(tag(CLASS)),
         pair(
@@ -100,33 +152,44 @@ pub fn information_object_class(input: Input<'_>) -> ParserResult<'_, Informatio
             ))),
             opt(preceded(skip_ws_and_comments(tag(WITH_SYNTAX)), syntax)),
         ),
-    ))(input)
+    ))
+    .parse(input)
 }
 
-pub fn information_object_field_reference(
-    input: Input<'_>,
-) -> ParserResult<'_, InformationObjectFieldReference> {
-    into(tuple((
+/// Parses an ObjectClassFieldType.
+///
+/// # Syntax
+///
+/// ```text
+/// ObjectClassFieldType ::=
+///     DefinedObjectClass
+///     "."
+///     FieldName
+/// ```
+pub fn object_class_field_type(input: Input<'_>) -> ParserResult<'_, ObjectClassFieldType> {
+    into((
         skip_ws_and_comments(uppercase_identifier),
         many1(skip_ws_and_comments(preceded(
             char(DOT),
             skip_ws_and_comments(object_field_identifier),
         ))),
-        opt(constraint),
-    )))(input)
+        opt(constraints),
+    ))
+    .parse(input)
 }
 
 pub fn information_object(input: Input<'_>) -> ParserResult<'_, InformationObjectFields> {
     in_braces(alt((
         default_syntax_information_object,
         custom_syntax_information_object,
-    )))(input)
+    )))
+    .parse(input)
 }
 
 pub fn object_set(input: Input<'_>) -> ParserResult<'_, ObjectSet> {
-    into(in_braces(tuple((
+    into(in_braces((
         separated_list0(
-            skip_ws_and_comments(alt((tag(PIPE), tag(UNION)))),
+            skip_ws_and_comments(union_mark),
             skip_ws_and_comments(alt((
                 into(information_object),
                 into(skip_ws_and_comments(identifier)),
@@ -139,14 +202,15 @@ pub fn object_set(input: Input<'_>) -> ParserResult<'_, ObjectSet> {
         opt(skip_ws_and_comments(preceded(
             char(COMMA),
             separated_list1(
-                skip_ws_and_comments(alt((tag(PIPE), tag(UNION)))),
+                skip_ws_and_comments(union_mark),
                 skip_ws_and_comments(alt((
                     into(information_object),
                     into(skip_ws_and_comments(identifier)),
                 ))),
             ),
         ))),
-    ))))(input)
+    )))
+    .parse(input)
 }
 
 fn custom_syntax_information_object(input: Input<'_>) -> ParserResult<'_, InformationObjectFields> {
@@ -162,7 +226,8 @@ fn custom_syntax_information_object(input: Input<'_>) -> ParserResult<'_, Inform
             map(syntax_literal, |m| SyntaxApplication::Literal(m.into())),
         ))))),
         InformationObjectFields::CustomSyntax,
-    )(input)
+    )
+    .parse(input)
 }
 
 fn default_syntax_information_object(
@@ -184,58 +249,62 @@ fn default_syntax_information_object(
             optional_comma,
         )),
         InformationObjectFields::DefaultSyntax,
-    )(input)
+    )
+    .parse(input)
 }
 
 fn information_object_field(input: Input<'_>) -> ParserResult<'_, InformationObjectClassField> {
-    into(tuple((
+    into((
         skip_ws_and_comments(object_field_identifier),
         opt(skip_ws_and_comments(asn1_type)),
         opt(into_inner(skip_ws_and_comments(tag(UNIQUE)))),
-        optional_marker,
-        default,
-    )))(input)
+        skip_ws_and_comments(optionality(asn1_value)),
+    ))
+    .parse(input)
 }
 
 fn object_field_identifier(input: Input<'_>) -> ParserResult<'_, ObjectFieldIdentifier> {
-    alt((single_value_field_id, multiple_value_field_id))(input)
+    alt((single_value_field_id, multiple_value_field_id)).parse(input)
 }
 
 fn single_value_field_id(input: Input<'_>) -> ParserResult<'_, ObjectFieldIdentifier> {
     map(
-        into_inner(recognize(tuple((
+        into_inner(recognize((
             char(AMPERSAND),
             one_of("abcdefghijklmnopqrstuvwxyz"),
             many0(alt((preceded(char('-'), alphanumeric1), alphanumeric1))),
-        )))),
+        ))),
         |s| ObjectFieldIdentifier::SingleValue(String::from(s)),
-    )(input)
+    )
+    .parse(input)
 }
 
 fn multiple_value_field_id(input: Input<'_>) -> ParserResult<'_, ObjectFieldIdentifier> {
     map(
-        into_inner(recognize(tuple((
+        into_inner(recognize((
             char(AMPERSAND),
             one_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
             many0(alt((preceded(char('-'), alphanumeric1), alphanumeric1))),
-        )))),
+        ))),
         |m| ObjectFieldIdentifier::MultipleValue(String::from(m)),
-    )(input)
+    )
+    .parse(input)
 }
 
 fn syntax(input: Input<'_>) -> ParserResult<'_, Vec<SyntaxExpression>> {
-    in_braces(many1(syntax_token_or_group_spec))(input)
+    in_braces(many1(syntax_token_or_group_spec)).parse(input)
 }
 
 fn syntax_token_or_group_spec(input: Input<'_>) -> ParserResult<'_, SyntaxExpression> {
     alt((
         map(syntax_token, SyntaxExpression::Required),
         map(syntax_optional_group, SyntaxExpression::Optional),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 fn syntax_optional_group(input: Input<'_>) -> ParserResult<'_, Vec<SyntaxExpression>> {
-    in_brackets(skip_ws_and_comments(many1(syntax_token_or_group_spec)))(input)
+    in_brackets(skip_ws_and_comments(many1(syntax_token_or_group_spec))).parse(input)
 }
 
 fn syntax_token(input: Input<'_>) -> ParserResult<'_, SyntaxToken> {
@@ -246,28 +315,29 @@ fn syntax_token(input: Input<'_>) -> ParserResult<'_, SyntaxToken> {
             into_inner(tag(COMMA.to_string().as_str())),
             SyntaxToken::from,
         ),
-    )))(input)
+    )))
+    .parse(input)
 }
 
 fn syntax_literal(input: Input<'_>) -> ParserResult<'_, &str> {
-    uppercase_identifier(input)
+    uppercase_identifier.parse(input)
 }
 
 #[cfg(test)]
 mod tests {
     use std::vec;
 
-    use crate::intermediate::types::*;
+    use crate::intermediate::{types::*, ASN1Value, ToplevelTypeDefinition};
 
-    use crate::lexer::information_object_class::{information_object_class, object_set};
+    use crate::lexer::information_object_class::object_set;
     use crate::lexer::top_level_type_declaration;
 
     use super::*;
 
     #[test]
-    fn parses_information_object_class() {
+    fn parses_object_class_defn() {
         assert_eq!(
-            information_object_class(
+            object_class_defn(
                 r#"CLASS
       {&operationCode CHOICE {local INTEGER,
       global OCTET STRING}
@@ -279,7 +349,7 @@ mod tests {
             )
             .unwrap()
             .1,
-            InformationObjectClass {
+            ObjectClassDefn {
                 syntax: None,
                 fields: vec![
                     InformationObjectClassField {
@@ -309,34 +379,31 @@ mod tests {
                             ],
                             constraints: vec![]
                         })),
-                        is_optional: false,
+                        optionality: Optionality::Required,
                         is_unique: true,
-                        default: None
                     },
                     InformationObjectClassField {
                         identifier: ObjectFieldIdentifier::MultipleValue("&ArgumentType".into()),
                         ty: None,
-                        is_optional: false,
+                        optionality: Optionality::Required,
                         is_unique: false,
-                        default: None
                     },
                     InformationObjectClassField {
                         identifier: ObjectFieldIdentifier::MultipleValue("&ResultType".into()),
                         ty: None,
-                        is_optional: false,
+                        optionality: Optionality::Required,
                         is_unique: false,
-                        default: None
                     },
                     InformationObjectClassField {
                         identifier: ObjectFieldIdentifier::MultipleValue("&Errors".into()),
                         ty: Some(ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             constraints: vec![],
                             identifier: "ERROR".into()
                         })),
-                        is_optional: true,
+                        optionality: Optionality::Optional,
                         is_unique: false,
-                        default: None
                     }
                 ]
             }
@@ -387,6 +454,7 @@ mod tests {
                         InformationObjectField::FixedValueField(FixedValueField {
                             identifier: "&errorCode".to_string(),
                             value: ASN1Value::ElsewhereDeclaredValue {
+                                module: None,
                                 identifier: "asn-val-security-failure".into(),
                                 parent: None
                             }
@@ -402,6 +470,7 @@ mod tests {
                         InformationObjectField::FixedValueField(FixedValueField {
                             identifier: "&errorCode".into(),
                             value: ASN1Value::ElsewhereDeclaredValue {
+                                module: None,
                                 identifier: "asn-val-unknown-order".into(),
                                 parent: None
                             }
@@ -414,9 +483,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_information_object_class_with_custom_syntax() {
+    fn parses_object_class_defn_with_custom_syntax() {
         assert_eq!(
-            information_object_class(
+            object_class_defn(
                 r#"CLASS{
             &itsaidCtxRef ItsAidCtxRef UNIQUE,
             &ContextInfo OPTIONAL
@@ -426,24 +495,23 @@ mod tests {
             )
             .unwrap()
             .1,
-            InformationObjectClass {
+            ObjectClassDefn {
                 fields: vec![
                     InformationObjectClassField {
                         identifier: ObjectFieldIdentifier::SingleValue("&itsaidCtxRef".into()),
                         ty: Some(ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "ItsAidCtxRef".into(),
                             constraints: vec![]
                         })),
-                        is_optional: false,
-                        default: None,
+                        optionality: Optionality::Required,
                         is_unique: true
                     },
                     InformationObjectClassField {
                         identifier: ObjectFieldIdentifier::MultipleValue("&ContextInfo".into()),
                         ty: None,
-                        is_optional: true,
-                        default: None,
+                        optionality: Optionality::Optional,
                         is_unique: false
                     }
                 ],
@@ -464,10 +532,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_information_object_with_custom_syntax() {
+    fn parses_object_class_defn_with_custom_syntax_2() {
         println!(
             "{:?}",
-            information_object_class(
+            object_class_defn(
                 r#"CLASS {&id    BilateralDomain UNIQUE,
             &Type
 }WITH SYNTAX {&Type,
@@ -489,13 +557,13 @@ mod tests {
                 comments: "".into(),
                 tag: None,
                 name: "AttributeValue".into(),
-                ty: ASN1Type::InformationObjectFieldReference(InformationObjectFieldReference {
+                ty: ASN1Type::ObjectClassField(ObjectClassFieldType {
                     class: "OPEN".into(),
                     field_path: vec![ObjectFieldIdentifier::MultipleValue("&Type".into())],
                     constraints: vec![]
                 }),
                 parameterization: None,
-                index: None
+                module_header: None
             }
         )
     }
@@ -504,7 +572,7 @@ mod tests {
     fn tld_test() {
         println!(
             "{:?}",
-            super::information_object_class(
+            super::object_class_defn(
                 r#"CLASS {
                     &InitiatingMessage				,
                     &SuccessfulOutcome							OPTIONAL,
@@ -523,5 +591,35 @@ mod tests {
                 .into()
             )
         )
+    }
+
+    #[test]
+    fn parses_optionality_optional() {
+        let input = Input::from("OPTIONAL,");
+
+        let (rest, res) = optionality(asn1_value).parse(input).unwrap();
+
+        assert_eq!(rest.inner(), ",");
+        assert_eq!(res, Optionality::Optional);
+    }
+
+    #[test]
+    fn parses_optionality_default() {
+        let input = Input::from("DEFAULT 123,");
+
+        let (rest, res) = optionality(asn1_value).parse(input).unwrap();
+
+        assert_eq!(rest.inner(), ",");
+        assert_eq!(res, Optionality::Default(ASN1Value::Integer(123)));
+    }
+
+    #[test]
+    fn parses_optionality_required() {
+        let input = Input::from(",");
+
+        let (rest, res) = optionality(asn1_value).parse(input).unwrap();
+
+        assert_eq!(rest.inner(), ",");
+        assert_eq!(res, Optionality::Required);
     }
 }

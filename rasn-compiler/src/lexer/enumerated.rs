@@ -3,13 +3,14 @@ use nom::{
     character::complete::{char, i128},
     combinator::{map, opt},
     multi::{fold_many0, many0},
-    sequence::{preceded, terminated, tuple},
+    sequence::{preceded, terminated},
+    Parser,
 };
 
 use crate::{
     input::Input,
     intermediate::{constraints::*, types::*, *},
-    lexer::{asn1_type, parameterization},
+    lexer::{asn1_type, error::ErrorTree, parameterization},
 };
 
 use super::{common::*, error::ParserResult};
@@ -23,13 +24,13 @@ type EnumeralBody = (
 
 pub fn enumerated_value(input: Input<'_>) -> ParserResult<'_, ToplevelValueDefinition> {
     map(
-        tuple((
+        (
             skip_ws(many0(comment)),
-            skip_ws(value_identifier),
+            skip_ws(value_reference),
             skip_ws_and_comments(opt(parameterization)),
             skip_ws_and_comments(asn1_type),
-            preceded(assignment, skip_ws_and_comments(value_identifier)),
-        )),
+            preceded(assignment, skip_ws_and_comments(value_reference)),
+        ),
         |(c, n, params, p, e)| ToplevelValueDefinition {
             comments: c.into_iter().fold(String::new(), |mut acc, s| {
                 acc = acc + "\n" + s;
@@ -42,9 +43,10 @@ pub fn enumerated_value(input: Input<'_>) -> ParserResult<'_, ToplevelValueDefin
                 enumerated: p.as_str().into_owned(),
                 enumerable: e.to_string(),
             },
-            index: None,
+            module_header: None,
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Tries to parse an ASN1 ENUMERATED
@@ -59,19 +61,23 @@ pub fn enumerated(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
     map(
         preceded(skip_ws_and_comments(tag(ENUMERATED)), enumerated_body),
         |m| ASN1Type::Enumerated(m.into()),
-    )(input)
+    )
+    .parse(input)
 }
 
 fn enumeral(input: Input<'_>) -> ParserResult<'_, EnumeralInput<'_>> {
-    skip_ws_and_comments(tuple((
+    skip_ws_and_comments((
         skip_ws(identifier),
         skip_ws(opt(in_parentheses(skip_ws_and_comments(i128)))),
         opt(skip_ws_and_comments(char(COMMA))),
         skip_ws(opt(comment)),
-    )))(input)
+    ))
+    .parse(input)
 }
 
-fn enumerals<'a>(start_index: usize) -> impl FnMut(Input<'a>) -> ParserResult<'a, Vec<Enumeral>> {
+fn enumerals<'a>(
+    start_index: usize,
+) -> impl Parser<Input<'a>, Output = Vec<Enumeral>, Error = ErrorTree<'a>> {
     fold_many0(
         enumeral,
         Vec::<Enumeral>::new,
@@ -88,11 +94,16 @@ fn enumerals<'a>(start_index: usize) -> impl FnMut(Input<'a>) -> ParserResult<'a
 
 fn enumerated_body(input: Input<'_>) -> ParserResult<'_, EnumeralBody> {
     in_braces(|input| {
-        let (input, root_enumerals) = enumerals(0)(input)?;
-        let (input, ext_marker) = opt(terminated(extension_marker, opt(char(COMMA))))(input)?;
-        let (input, ext_enumerals) = opt(enumerals(root_enumerals.len()))(input)?;
+        let (input, root_enumerals) = enumerals(0).parse(input)?;
+        let (input, ext_marker) = opt(terminated(
+            extension_marker,
+            skip_ws_and_comments(opt(char(COMMA))),
+        ))
+        .parse(input)?;
+        let (input, ext_enumerals) = opt(enumerals(root_enumerals.len())).parse(input)?;
         Ok((input, (root_enumerals, ext_marker, ext_enumerals)))
-    })(input)
+    })
+    .parse(input)
 }
 
 #[cfg(test)]
@@ -103,15 +114,16 @@ mod tests {
     #[test]
     fn parses_enumerals_with_line_comments() {
         assert_eq!(
-            enumerals(0)(
-                r#"forward     (1), -- This means forward
+            enumerals(0)
+                .parse(
+                    r#"forward     (1), -- This means forward
       backward    (2), -- This means backward
       unavailable (3)  -- This means nothing
       "#
-                .into()
-            )
-            .unwrap()
-            .1,
+                    .into()
+                )
+                .unwrap()
+                .1,
             [
                 Enumeral {
                     name: "forward".into(),
@@ -337,6 +349,7 @@ mod tests {
                 name: String::from("enumeral-alias"),
                 associated_type: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                     parent: None,
+                    module: None,
                     identifier: String::from("Test-Enum"),
                     constraints: vec![],
                 }),
@@ -345,8 +358,41 @@ mod tests {
                     enumerated: String::from("Test-Enum"),
                     enumerable: String::from("enumeral")
                 },
-                index: None
+                module_header: None
             }
         )
+    }
+
+    #[test]
+    fn parses_comment_after_extension_mark() {
+        let input = Input::from(
+            "ENUMERATED {
+                enumeral1(0), ... -- extension addition --,
+                enumeral2(1)
+            }",
+        );
+
+        let (rest, result) = enumerated(input).unwrap();
+
+        assert!(rest.is_empty());
+        assert_eq!(
+            result,
+            ASN1Type::Enumerated(Enumerated {
+                members: vec![
+                    Enumeral {
+                        name: "enumeral1".to_owned(),
+                        description: None,
+                        index: 0
+                    },
+                    Enumeral {
+                        name: "enumeral2".to_owned(),
+                        description: None,
+                        index: 1
+                    }
+                ],
+                extensible: Some(1),
+                constraints: vec![],
+            })
+        );
     }
 }

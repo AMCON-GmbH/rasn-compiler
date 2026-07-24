@@ -3,7 +3,7 @@ use nom::{
     character::complete::{char, i128},
     combinator::{into, opt, recognize},
     multi::{many0, separated_list0, separated_list1},
-    sequence::{terminated, tuple},
+    sequence::terminated,
 };
 
 use crate::{
@@ -11,14 +11,14 @@ use crate::{
     intermediate::{types::*, *},
 };
 
-use super::{common::optional_comma, constraint::constraint, *};
+use super::{common::optional_comma, constraint::constraints, *};
 
 pub fn sequence_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
     map(
         in_braces(separated_list0(
             skip_ws_and_comments(char(',')),
             skip_ws_and_comments(alt((
-                pair(opt(value_identifier), skip_ws_and_comments(asn1_value)),
+                pair(opt(value_reference), skip_ws_and_comments(asn1_value)),
                 map(skip_ws_and_comments(asn1_value), |v| (None, v)),
             ))),
         )),
@@ -30,7 +30,8 @@ pub fn sequence_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
                     .collect(),
             )
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Tries to parse an ASN1 SEQUENCE
@@ -48,7 +49,7 @@ pub fn sequence(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
         preceded(
             skip_ws_and_comments(tag(SEQUENCE)),
             pair(
-                in_braces(tuple((
+                in_braces((
                     many0(terminated(
                         skip_ws_and_comments(sequence_component),
                         optional_comma,
@@ -58,12 +59,13 @@ pub fn sequence(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
                         skip_ws_and_comments(alt((extension_group, sequence_component))),
                         optional_comma,
                     ))),
-                ))),
-                opt(constraint),
+                )),
+                opt(constraints),
             ),
         ),
         |m| ASN1Type::Sequence(m.into()),
-    )(input)
+    )
+    .parse(input)
 }
 
 fn extension_group(input: Input<'_>) -> ParserResult<'_, SequenceComponent> {
@@ -98,12 +100,12 @@ fn extension_group(input: Input<'_>) -> ParserResult<'_, SequenceComponent> {
                     constraints: vec![],
                     members,
                 }),
-                default_value: None,
-                is_optional: false,
+                optionality: Optionality::Required,
                 constraints: vec![],
             })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 pub fn sequence_component(input: Input<'_>) -> ParserResult<'_, SequenceComponent> {
@@ -113,24 +115,25 @@ pub fn sequence_component(input: Input<'_>) -> ParserResult<'_, SequenceComponen
                 tag(COMPONENTS_OF),
                 skip_ws_and_comments(alt((
                     into_inner(recognize(separated_list1(tag(".&"), identifier))),
-                    title_case_identifier,
+                    type_reference,
                 ))),
             ),
             |id| SequenceComponent::ComponentsOf(id.into()),
         ),
         map(sequence_or_set_member, SequenceComponent::Member),
-    )))(input)
+    )))
+    .parse(input)
 }
 
 pub fn sequence_or_set_member(input: Input<'_>) -> ParserResult<'_, SequenceOrSetMember> {
-    into(tuple((
+    into((
         skip_ws_and_comments(identifier),
         opt(asn_tag),
         skip_ws_and_comments(asn1_type),
-        opt(constraint),
-        optional_marker,
-        default,
-    )))(input)
+        opt(constraints),
+        skip_ws_and_comments(optionality(asn1_value)),
+    ))
+    .parse(input)
 }
 
 #[cfg(test)]
@@ -140,66 +143,6 @@ mod tests {
     use crate::intermediate::constraints::*;
 
     use super::*;
-
-    #[test]
-    fn parses_optional_marker() {
-        assert_eq!(
-            optional_marker("\n\tOPTIONAL".into()).unwrap().1,
-            Some(OptionalMarker())
-        );
-        assert_eq!(optional_marker("DEFAULT".into()).unwrap().1, None);
-    }
-
-    #[test]
-    fn parses_default_int() {
-        assert_eq!(
-            default("\n\tDEFAULT\t-1".into()).unwrap().1,
-            Some(ASN1Value::Integer(-1))
-        );
-    }
-
-    #[test]
-    fn parses_default_boolean() {
-        assert_eq!(
-            default("  DEFAULT   TRUE".into()).unwrap().1,
-            Some(ASN1Value::Boolean(true))
-        );
-    }
-
-    #[test]
-    fn parses_default_bitstring() {
-        assert_eq!(
-            default("  DEFAULT '001010011'B".into()).unwrap().1,
-            Some(ASN1Value::BitString(vec![
-                false, false, true, false, true, false, false, true, true
-            ]))
-        );
-        assert_eq!(
-            default("DEFAULT 'F60E'H".into()).unwrap().1,
-            Some(ASN1Value::BitString(vec![
-                true, true, true, true, false, true, true, false, false, false, false, false, true,
-                true, true, false
-            ]))
-        );
-    }
-
-    #[test]
-    fn parses_default_enumeral() {
-        assert_eq!(
-            default("  DEFAULT enumeral1".into()).unwrap().1,
-            Some(ASN1Value::ElsewhereDeclaredValue {
-                identifier: "enumeral1".into(),
-                parent: None
-            })
-        );
-        assert_eq!(
-            default("DEFAULT enumeral1".into()).unwrap().1,
-            Some(ASN1Value::ElsewhereDeclaredValue {
-                identifier: "enumeral1".into(),
-                parent: None
-            })
-        );
-    }
 
     #[test]
     fn parses_subtyped_sequence() {
@@ -220,11 +163,13 @@ mod tests {
 is_recursive: false,
                     name: "clusterBoundingBoxShape".into(),
                     tag: None,
-                    ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere { parent: None,
-                        identifier: "Shape".into(), constraints: vec![Constraint::SubtypeConstraint(ElementSet { set: ElementOrSetOperation::Element(SubtypeElement::MultipleTypeConstraints(InnerTypeConstraint { is_partial: true, constraints: vec![ConstrainedComponent { identifier: "elliptical".into(), constraints: vec![], presence: ComponentPresence::Absent },ConstrainedComponent { identifier: "radial".into(), constraints: vec![], presence: ComponentPresence::Absent },ConstrainedComponent { identifier: "radialShapes".into(), constraints: vec![], presence: ComponentPresence::Absent }] })), extensible: false })
+                    ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
+                        parent: None,
+                        module: None,
+                        identifier: "Shape".into(),
+                        constraints: vec![Constraint::Subtype(ElementSetSpecs { set: ElementOrSetOperation::Element(SubtypeElements::MultipleTypeConstraints(InnerTypeConstraint { is_partial: true, constraints: vec![NamedConstraint { identifier: "elliptical".into(), constraints: vec![], presence: ComponentPresence::Absent },NamedConstraint { identifier: "radial".into(), constraints: vec![], presence: ComponentPresence::Absent },NamedConstraint { identifier: "radialShapes".into(), constraints: vec![], presence: ComponentPresence::Absent }] })), extensible: false })
                      ]}),
-                    default_value: None,
-                    is_optional: true,
+                    optionality: Optionality::Optional,
                     constraints: vec![],
                 }
             ]
@@ -255,11 +200,11 @@ is_recursive: false,
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "AccelerationValue".into(),
                             constraints: vec![]
                         }),
-                        default_value: None,
-                        is_optional: false,
+                        optionality: Optionality::Required,
                         constraints: vec![]
                     },
                     SequenceOrSetMember {
@@ -269,11 +214,11 @@ is_recursive: false,
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "AccelerationConfidence".into(),
                             constraints: vec![]
                         }),
-                        default_value: None,
-                        is_optional: false,
+                        optionality: Optionality::Required,
                         constraints: vec![],
                     }
                 ]
@@ -307,11 +252,11 @@ is_recursive: false,
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "CartesianCoordinateWithConfidence".into(),
                             constraints: vec![]
                         }),
-                        default_value: None,
-                        is_optional: false,
+                        optionality: Optionality::Required,
                         constraints: vec![],
                     },
                     SequenceOrSetMember {
@@ -320,11 +265,11 @@ is_recursive: false,
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "CartesianCoordinateWithConfidence".into(),
                             constraints: vec![]
                         }),
-                        default_value: None,
-                        is_optional: false,
+                        optionality: Optionality::Required,
                         constraints: vec![],
                     },
                     SequenceOrSetMember {
@@ -333,11 +278,11 @@ is_recursive: false,
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "CartesianCoordinateWithConfidence".into(),
                             constraints: vec![]
                         }),
-                        default_value: None,
-                        is_optional: true,
+                        optionality: Optionality::Optional,
                         constraints: vec![],
                     }
                 ]
@@ -371,11 +316,11 @@ is_recursive: false,
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "PosConfidenceEllipse".into(),
                             constraints: vec![]
                         }),
-                        default_value: None,
-                        is_optional: true,
+                        optionality: Optionality::Optional,
                         constraints: vec![],
                     },
                     SequenceOrSetMember {
@@ -384,14 +329,15 @@ is_recursive: false,
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "DeltaAltitude".into(),
                             constraints: vec![]
                         }),
-                        default_value: Some(ASN1Value::ElsewhereDeclaredValue {
+                        optionality: Optionality::Default(ASN1Value::ElsewhereDeclaredValue {
+                            module: None,
                             identifier: "unavailable".into(),
                             parent: None
                         }),
-                        is_optional: true,
                         constraints: vec![],
                     },
                     SequenceOrSetMember {
@@ -400,14 +346,15 @@ is_recursive: false,
                         tag: None,
                         ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "AltitudeConfidence".into(),
                             constraints: vec![]
                         }),
-                        default_value: Some(ASN1Value::ElsewhereDeclaredValue {
+                        optionality: Optionality::Default(ASN1Value::ElsewhereDeclaredValue {
+                            module: None,
                             identifier: "unavailable".into(),
                             parent: None
                         }),
-                        is_optional: true,
                         constraints: vec![],
                     }
                 ]
@@ -439,8 +386,8 @@ is_recursive: false,
                         name: "unNumber".into(),
                         tag: None,
                         ty: ASN1Type::Integer(Integer {
-                            constraints: vec![Constraint::SubtypeConstraint(ElementSet {
-                                set: ElementOrSetOperation::Element(SubtypeElement::ValueRange {
+                            constraints: vec![Constraint::Subtype(ElementSetSpecs {
+                                set: ElementOrSetOperation::Element(SubtypeElements::ValueRange {
                                     min: Some(ASN1Value::Integer(0)),
                                     max: Some(ASN1Value::Integer(9999)),
                                     extensible: false
@@ -449,8 +396,7 @@ is_recursive: false,
                             })],
                             distinguished_values: None,
                         }),
-                        default_value: None,
-                        is_optional: false,
+                        optionality: Optionality::Required,
                         constraints: vec![],
                     },
                     SequenceOrSetMember {
@@ -460,8 +406,7 @@ is_recursive: false,
                         ty: ASN1Type::Boolean(Boolean {
                             constraints: vec![]
                         }),
-                        default_value: Some(ASN1Value::Boolean(false)),
-                        is_optional: true,
+                        optionality: Optionality::Default(ASN1Value::Boolean(false)),
                         constraints: vec![],
                     },
                     SequenceOrSetMember {
@@ -469,11 +414,11 @@ is_recursive: false,
                         name: "emergencyActionCode".into(),
                         tag: None,
                         ty: ASN1Type::OctetString(OctetString {
-                            constraints: vec![Constraint::SubtypeConstraint(ElementSet {
+                            constraints: vec![Constraint::Subtype(ElementSetSpecs {
                                 set: ElementOrSetOperation::Element(
-                                    SubtypeElement::SizeConstraint(Box::new(
+                                    SubtypeElements::SizeConstraint(Box::new(
                                         ElementOrSetOperation::Element(
-                                            SubtypeElement::ValueRange {
+                                            SubtypeElements::ValueRange {
                                                 min: Some(ASN1Value::Integer(1)),
                                                 max: Some(ASN1Value::Integer(24)),
                                                 extensible: false
@@ -484,8 +429,7 @@ is_recursive: false,
                                 extensible: false
                             })],
                         }),
-                        default_value: None,
-                        is_optional: true,
+                        optionality: Optionality::Optional,
                         constraints: vec![],
                     }
                 ]
@@ -535,11 +479,11 @@ is_recursive: false,
                                 tag: None,
                                 ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                                     parent: None,
+                                    module: None,
                                     identifier: "Wow".into(),
                                     constraints: vec![]
                                 }),
-                                default_value: None,
-                                is_optional: false,
+                                optionality: Optionality::Required,
                                 constraints: vec![],
                             },
                             SequenceOrSetMember {
@@ -550,8 +494,7 @@ is_recursive: false,
                                 ty: ASN1Type::Boolean(Boolean {
                                     constraints: vec![]
                                 }),
-                                default_value: Some(ASN1Value::Boolean(true)),
-                                is_optional: true,
+                                optionality: Optionality::Default(ASN1Value::Boolean(true)),
                                 constraints: vec![],
                             },
                             SequenceOrSetMember {
@@ -569,12 +512,12 @@ is_recursive: false,
 
                                         tag: None,
                                         ty: ASN1Type::BitString(BitString {
-                                            constraints: vec![Constraint::SubtypeConstraint(
-                                                ElementSet {
+                                            constraints: vec![Constraint::Subtype(
+                                                ElementSetSpecs {
                                                     set: ElementOrSetOperation::Element(
-                                                        SubtypeElement::SizeConstraint(Box::new(
+                                                        SubtypeElements::SizeConstraint(Box::new(
                                                             ElementOrSetOperation::Element(
-                                                                SubtypeElement::SingleValue {
+                                                                SubtypeElements::SingleValue {
                                                                     value: ASN1Value::Integer(1),
                                                                     extensible: true
                                                                 }
@@ -586,19 +529,18 @@ is_recursive: false,
                                             )],
                                             distinguished_values: None
                                         }),
-                                        default_value: Some(ASN1Value::BitString(vec![false])),
-                                        is_optional: true,
+                                        optionality: Optionality::Default(ASN1Value::BitString(
+                                            vec![false]
+                                        )),
                                         constraints: vec![],
                                     }]
                                 }),
-                                default_value: None,
-                                is_optional: true,
+                                optionality: Optionality::Optional,
                                 constraints: vec![],
                             }
                         ]
                     }),
-                    default_value: None,
-                    is_optional: false,
+                    optionality: Optionality::Required,
                     constraints: vec![],
                 }]
             })
@@ -623,6 +565,7 @@ is_recursive: false,
                 (
                     Some("ctx".into()),
                     Box::new(ASN1Value::ElsewhereDeclaredValue {
+                        module: None,
                         identifier: "c-ctxRefNull".into(),
                         parent: None
                     })
@@ -654,8 +597,8 @@ is_recursive: false,
                         name: "item-code".into(),
                         tag: None,
                         ty: ASN1Type::Integer(Integer {
-                            constraints: vec![Constraint::SubtypeConstraint(ElementSet {
-                                set: ElementOrSetOperation::Element(SubtypeElement::ValueRange {
+                            constraints: vec![Constraint::Subtype(ElementSetSpecs {
+                                set: ElementOrSetOperation::Element(SubtypeElements::ValueRange {
                                     min: Some(ASN1Value::Integer(0)),
                                     max: Some(ASN1Value::Integer(254)),
                                     extensible: false
@@ -664,8 +607,7 @@ is_recursive: false,
                             })],
                             distinguished_values: None,
                         }),
-                        default_value: None,
-                        is_optional: false,
+                        optionality: Optionality::Required,
                         constraints: vec![]
                     },
                     SequenceOrSetMember {
@@ -682,22 +624,19 @@ is_recursive: false,
                                     name: "alternate-item-code".into(),
                                     tag: None,
                                     ty: ASN1Type::Integer(Integer {
-                                        constraints: vec![Constraint::SubtypeConstraint(
-                                            ElementSet {
-                                                set: ElementOrSetOperation::Element(
-                                                    SubtypeElement::ValueRange {
-                                                        min: Some(ASN1Value::Integer(0)),
-                                                        max: Some(ASN1Value::Integer(254)),
-                                                        extensible: false
-                                                    }
-                                                ),
-                                                extensible: false
-                                            }
-                                        )],
+                                        constraints: vec![Constraint::Subtype(ElementSetSpecs {
+                                            set: ElementOrSetOperation::Element(
+                                                SubtypeElements::ValueRange {
+                                                    min: Some(ASN1Value::Integer(0)),
+                                                    max: Some(ASN1Value::Integer(254)),
+                                                    extensible: false
+                                                }
+                                            ),
+                                            extensible: false
+                                        })],
                                         distinguished_values: None,
                                     }),
-                                    default_value: None,
-                                    is_optional: false,
+                                    optionality: Optionality::Required,
                                     constraints: vec![]
                                 },
                                 SequenceOrSetMember {
@@ -707,14 +646,12 @@ is_recursive: false,
                                     ty: ASN1Type::Boolean(Boolean {
                                         constraints: vec![]
                                     }),
-                                    default_value: Some(ASN1Value::Boolean(true)),
-                                    is_optional: true,
+                                    optionality: Optionality::Default(ASN1Value::Boolean(true)),
                                     constraints: vec![]
                                 }
                             ]
                         }),
-                        default_value: None,
-                        is_optional: false,
+                        optionality: Optionality::Required,
                         constraints: vec![]
                     }
                 ]
@@ -744,11 +681,11 @@ is_recursive: false,
                     tag: None,
                     ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                         parent: None,
+                        module: None,
                         identifier: "TypeB".into(),
                         constraints: vec![]
                     }),
-                    default_value: None,
-                    is_optional: false,
+                    optionality: Optionality::Required,
                     constraints: vec![]
                 }]
             })
@@ -852,8 +789,8 @@ integrityCheckValue     ICV OPTIONAL
                         element_tag: None,
                         constraints: vec![],
                         element_type: Box::new(ASN1Type::Integer(Integer {
-                            constraints: vec![Constraint::SubtypeConstraint(ElementSet {
-                                set: ElementOrSetOperation::Element(SubtypeElement::ValueRange {
+                            constraints: vec![Constraint::Subtype(ElementSetSpecs {
+                                set: ElementOrSetOperation::Element(SubtypeElements::ValueRange {
                                     min: Some(ASN1Value::Integer(1,),),
                                     max: Some(ASN1Value::Integer(5,),),
                                     extensible: false,
@@ -864,8 +801,7 @@ integrityCheckValue     ICV OPTIONAL
                         },)),
                         is_recursive: false,
                     },),
-                    default_value: None,
-                    is_optional: false,
+                    optionality: Optionality::Required,
                     is_recursive: false,
                     constraints: vec![],
                 }],
@@ -907,12 +843,41 @@ integrityCheckValue     ICV OPTIONAL
                         },),
                         is_recursive: false,
                     },),
-                    default_value: None,
-                    is_optional: false,
+                    optionality: Optionality::Required,
                     is_recursive: false,
                     constraints: vec![],
                 },],
             },)
+        )
+    }
+
+    #[test]
+    fn sequence_with_qualified_symbols() {
+        let input = Input::from("SEQUENCE { name ETSI-Common-Types.Name }");
+
+        let (rest, output) = sequence(input).unwrap();
+        assert!(rest.inner().trim().is_empty());
+
+        assert_eq!(
+            output,
+            ASN1Type::Sequence(SequenceOrSet {
+                components_of: vec![],
+                extensible: None,
+                constraints: vec![],
+                members: vec![SequenceOrSetMember {
+                    name: "name".to_string(),
+                    tag: None,
+                    ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
+                        parent: None,
+                        module: Some("ETSI-Common-Types".to_string()),
+                        identifier: "Name".to_string(),
+                        constraints: vec![],
+                    }),
+                    optionality: Optionality::Required,
+                    is_recursive: false,
+                    constraints: vec![],
+                }],
+            })
         )
     }
 }

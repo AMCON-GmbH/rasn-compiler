@@ -1,8 +1,8 @@
-use std::{ops::Not, str::FromStr};
+use std::str::FromStr;
 
 use proc_macro2::{Ident, Literal, Punct, Spacing, Span, TokenStream};
 use quote::{format_ident, quote, ToTokens, TokenStreamExt};
-use types::{BitString, OctetString};
+use types::{BitString, OctetString, Optionality};
 use utils::types::SequenceOrSetOf;
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
         encoding_rules::per_visible::{
             per_visible_range_constraints, CharsetSubset, PerVisibleAlphabetConstraints,
         },
-        information_object::{InformationObjectClass, InformationObjectField},
+        information_object::{InformationObjectField, ObjectClassDefn},
         types::{Choice, ChoiceOption, Enumerated, SequenceOrSet, SequenceOrSetMember},
         ASN1Type, ASN1Value, AsnTag, CharacterStringType, IntegerType, TagClass,
         TaggingEnvironment, ToplevelDefinition, ToplevelTypeDefinition,
@@ -32,26 +32,24 @@ macro_rules! error {
     };
 }
 
-pub(crate) use error;
-
-use self::types::{CharacterString, Constrainable};
+use self::types::Constrainable;
 
 use super::*;
 
 const INNER_TYPE_COMMENT: &str = " Inner type ";
 
-impl IntegerType {
-    fn to_token_stream(self) -> TokenStream {
+impl ToTokens for IntegerType {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         match self {
-            IntegerType::Int8 => quote!(i8),
-            IntegerType::Uint8 => quote!(u8),
-            IntegerType::Int16 => quote!(i16),
-            IntegerType::Uint16 => quote!(u16),
-            IntegerType::Int32 => quote!(i32),
-            IntegerType::Uint32 => quote!(u32),
-            IntegerType::Int64 => quote!(i64),
-            IntegerType::Uint64 => quote!(u64),
-            IntegerType::Unbounded => quote!(Integer),
+            IntegerType::Int8 => tokens.append_all(quote!(i8)),
+            IntegerType::Uint8 => tokens.append_all(quote!(u8)),
+            IntegerType::Int16 => tokens.append_all(quote!(i16)),
+            IntegerType::Uint16 => tokens.append_all(quote!(u16)),
+            IntegerType::Int32 => tokens.append_all(quote!(i32)),
+            IntegerType::Uint32 => tokens.append_all(quote!(u32)),
+            IntegerType::Int64 => tokens.append_all(quote!(i64)),
+            IntegerType::Uint64 => tokens.append_all(quote!(u64)),
+            IntegerType::Unbounded => tokens.append_all(quote!(Integer)),
         }
     }
 }
@@ -132,12 +130,12 @@ impl Rasn {
         }
     }
 
-    pub(crate) fn format_comments(&self, comments: &str) -> Result<TokenStream, GeneratorError> {
+    pub(crate) fn format_comments(&self, comments: &str) -> TokenStream {
         if comments.is_empty() {
-            Ok(TokenStream::new())
+            TokenStream::new()
         } else {
-            let joined = String::from("///") + &comments.replace('\n', "\n ///") + "\n";
-            Ok(TokenStream::from_str(&joined)?)
+            let comments = comments.lines().map(|c| c.trim_end_matches('\r'));
+            quote!(#(#[doc = #comments])*)
         }
     }
 
@@ -226,7 +224,7 @@ impl Rasn {
     pub(crate) fn format_alphabet_annotations(
         &self,
         string_type: CharacterStringType,
-        constraints: &Vec<Constraint>,
+        constraints: &[Constraint],
     ) -> Result<TokenStream, GeneratorError> {
         if constraints.is_empty() {
             return Ok(TokenStream::new());
@@ -256,7 +254,7 @@ impl Rasn {
             TokenStream::new()
         } else {
             let alphabet_ts: TokenStream = alphabet_unicode
-                .parse()                           // turn the text into *tokens*
+                .parse() // turn the text into *tokens*
                 .expect("internal error: cannot parse generated unicode list");
             quote!(from(#alphabet_ts))
         })
@@ -301,11 +299,7 @@ impl Rasn {
         Ok(quote!(#(#enumerals)*))
     }
 
-    pub(crate) fn format_tag(
-        &self,
-        tag: Option<&AsnTag>,
-        fallback_to_automatic: bool,
-    ) -> TokenStream {
+    pub(crate) fn format_tag(&self, tag: Option<&AsnTag>) -> TokenStream {
         if let Some(tag) = tag {
             let class = match tag.tag_class {
                 TagClass::Universal => quote!(universal),
@@ -319,8 +313,6 @@ impl Rasn {
             } else {
                 quote!(tag(#class, #id))
             }
-        } else if fallback_to_automatic {
-            quote!(automatic_tags)
         } else {
             TokenStream::new()
         }
@@ -329,7 +321,7 @@ impl Rasn {
     pub(crate) fn format_sequence_or_set_members(
         &self,
         sequence_or_set: &SequenceOrSet,
-        parent_name: &String,
+        parent_name: &str,
     ) -> Result<FormattedMembers, GeneratorError> {
         let first_extension_index = sequence_or_set.extensible;
 
@@ -337,16 +329,14 @@ impl Rasn {
             FormattedMembers::default(),
             |mut acc, (i, m)| {
                 let nested = if Self::needs_unnesting(&m.ty) {
-                    Some(
-                        self.generate_tld(ToplevelDefinition::Type(ToplevelTypeDefinition {
-                            parameterization: None,
-                            comments: INNER_TYPE_COMMENT.into(),
-                            name: self.inner_name(&m.name, parent_name).to_string(),
-                            ty: m.ty.clone(),
-                            tag: None,
-                            index: None,
-                        })),
-                    )
+                    Some(self.generate_type(ToplevelTypeDefinition {
+                        parameterization: None,
+                        comments: INNER_TYPE_COMMENT.into(),
+                        name: self.inner_name(&m.name, parent_name).to_string(),
+                        ty: m.ty.clone(),
+                        tag: None,
+                        module_header: None,
+                    }))
                     .transpose()
                 } else {
                     Ok(None)
@@ -379,15 +369,17 @@ impl Rasn {
     pub(crate) fn format_sequence_member(
         &self,
         member: &SequenceOrSetMember,
-        parent_name: &String,
+        parent_name: &str,
         extension_annotation: TokenStream,
     ) -> Result<(TokenStream, NameType), GeneratorError> {
         let name = self.to_rust_snake_case(&member.name);
         let default_annotation = member
-            .default_value
-            .as_ref()
+            .optionality
+            .default()
             .map(|_| {
-                let default_fn = self.default_method_name(parent_name, &member.name);
+                let default_fn = self
+                    .default_method_name(parent_name, &member.name)
+                    .to_string();
                 quote!(default = #default_fn)
             })
             .unwrap_or_default();
@@ -401,7 +393,7 @@ impl Rasn {
             extension_annotation,
             Some(default_annotation),
         )?;
-        if (member.is_optional && member.default_value.is_none())
+        if (member.optionality == Optionality::Optional)
             || member
                 .name
                 .starts_with(INTERNAL_EXTENSION_GROUP_NAME_PREFIX)
@@ -423,23 +415,21 @@ impl Rasn {
     pub(crate) fn format_choice_options(
         &self,
         choice: &Choice,
-        parent_name: &String,
+        parent_name: &str,
     ) -> Result<FormattedOptions, GeneratorError> {
         let first_extension_index = choice.extensible;
         choice.options.iter().enumerate().try_fold(
             FormattedOptions::default(),
             |mut acc, (i, o)| {
                 let nested = if Self::needs_unnesting(&o.ty) {
-                    Some(
-                        self.generate_tld(ToplevelDefinition::Type(ToplevelTypeDefinition {
-                            parameterization: None,
-                            comments: INNER_TYPE_COMMENT.into(),
-                            name: self.inner_name(&o.name, parent_name).to_string(),
-                            ty: o.ty.clone(),
-                            tag: None,
-                            index: None,
-                        })),
-                    )
+                    Some(self.generate_type(ToplevelTypeDefinition {
+                        parameterization: None,
+                        comments: INNER_TYPE_COMMENT.into(),
+                        name: self.inner_name(&o.name, parent_name).to_string(),
+                        ty: o.ty.clone(),
+                        tag: None,
+                        module_header: None,
+                    }))
                     .transpose()
                 } else {
                     Ok(None)
@@ -471,7 +461,7 @@ impl Rasn {
         &self,
         name: Ident,
         member: &ChoiceOption,
-        parent_name: &String,
+        parent_name: &str,
         extension_annotation: TokenStream,
     ) -> Result<TokenStream, GeneratorError> {
         let FormattedMemberOrOption {
@@ -510,10 +500,27 @@ impl Rasn {
         } else {
             all_constraints.append(&mut member.constraints().to_owned());
         }
-        let range_annotations = self.format_range_annotations(
-            matches!(member.ty(), ASN1Type::Integer(_)),
-            &all_constraints,
-        )?;
+        let range_annotations = if let ASN1Type::CharacterString(c_string) = member.ty() {
+            // ITU-T X.691 clause 30.1, 30.6: Known-multiplier character strings types
+            match c_string.ty {
+                // 30.1: Known-multiplier character string types
+                CharacterStringType::NumericString
+                | CharacterStringType::PrintableString
+                | CharacterStringType::VisibleString
+                | CharacterStringType::IA5String
+                | CharacterStringType::BMPString
+                | CharacterStringType::UniversalString => {
+                    self.format_range_annotations(false, &all_constraints)?
+                }
+                // 30.6: Non-known-multiplier character string types
+                _ => TokenStream::new(),
+            }
+        } else {
+            self.format_range_annotations(
+                matches!(member.ty(), ASN1Type::Integer(_)),
+                &all_constraints,
+            )?
+        };
         let alphabet_annotations = if let ASN1Type::CharacterString(c_string) = member.ty() {
             self.format_alphabet_annotations(c_string.ty, &all_constraints)?
         } else {
@@ -523,7 +530,7 @@ impl Rasn {
             extension_annotation,
             range_annotations,
             alphabet_annotations,
-            self.format_tag(member.tag(), false),
+            self.format_tag(member.tag()),
         ];
         if let Some(default) = default_annotation {
             annotation_items.push(default);
@@ -581,7 +588,7 @@ impl Rasn {
                     kind: GeneratorErrorType::NotYetInplemented,
                 })
             }
-            ASN1Type::CharacterString(c) => (c.constraints.clone(), self.string_type(&c.ty)?),
+            ASN1Type::CharacterString(c) => (c.constraints.clone(), self.string_type(c.ty)?),
             ASN1Type::Enumerated(_)
             | ASN1Type::Choice(_)
             | ASN1Type::Sequence(_)
@@ -599,7 +606,7 @@ impl Rasn {
                     parent_name,
                     s.is_recursive,
                 )?;
-                (s.constraints().clone(), quote!(SequenceOf<#inner_type>))
+                (s.constraints().to_owned(), quote!(SequenceOf<#inner_type>))
             }
             ASN1Type::SetOf(s) => {
                 let (_, inner_type) = self.constraints_and_type_name(
@@ -608,16 +615,17 @@ impl Rasn {
                     parent_name,
                     s.is_recursive,
                 )?;
-                (s.constraints().clone(), quote!(SetOf<#inner_type>))
+                (s.constraints().to_owned(), quote!(SetOf<#inner_type>))
             }
             ASN1Type::ElsewhereDeclaredType(e) => {
-                let mut tokenized = self.to_rust_title_case(&e.identifier).to_token_stream();
+                let mut tokenized = self.to_rust_qualified_type(e.module.as_deref(), &e.identifier);
                 if is_recursive {
                     tokenized = boxed_type(tokenized);
                 };
                 (e.constraints.clone(), tokenized)
             }
-            ASN1Type::InformationObjectFieldReference(_)
+            ASN1Type::Any
+            | ASN1Type::ObjectClassField(_)
             | ASN1Type::EmbeddedPdv
             | ASN1Type::External => (vec![], quote!(Any)),
             ASN1Type::ChoiceSelectionType(_) => unreachable!(),
@@ -626,7 +634,7 @@ impl Rasn {
 
     pub(crate) fn string_type(
         &self,
-        c_type: &CharacterStringType,
+        c_type: CharacterStringType,
     ) -> Result<TokenStream, GeneratorError> {
         match c_type {
             CharacterStringType::NumericString => Ok(quote!(NumericString)),
@@ -640,11 +648,7 @@ impl Rasn {
             }),
             CharacterStringType::GraphicString => Ok(quote!(GraphicString)),
             CharacterStringType::GeneralString => Ok(quote!(GeneralString)),
-            CharacterStringType::UniversalString => Err(GeneratorError {
-                kind: GeneratorErrorType::NotYetInplemented,
-                details: "UniversalString is currently unsupported!".into(),
-                top_level_declaration: None,
-            }),
+            CharacterStringType::UniversalString => Ok(quote!(UniversalString)),
             CharacterStringType::UTF8String => Ok(quote!(Utf8String)),
             CharacterStringType::BMPString => Ok(quote!(BmpString)),
             CharacterStringType::PrintableString => Ok(quote!(PrintableString)),
@@ -675,8 +679,8 @@ impl Rasn {
         }
     }
 
-    pub(crate) fn default_method_name(&self, parent_name: &str, field_name: &str) -> String {
-        format!(
+    pub(crate) fn default_method_name(&self, parent_name: &str, field_name: &str) -> Ident {
+        format_ident!(
             "{}_{}_default",
             self.to_rust_snake_case(parent_name),
             self.to_rust_snake_case(field_name)
@@ -690,14 +694,13 @@ impl Rasn {
     ) -> Result<TokenStream, GeneratorError> {
         let mut output = TokenStream::new();
         for member in members {
-            if let Some(value) = member.default_value.as_ref() {
+            if let Some(value) = member.optionality.default() {
                 let val = self.value_to_tokens(
                     value,
                     Some(&self.to_rust_title_case(&self.type_to_tokens(&member.ty)?.to_string())),
                 )?;
                 let ty = self.type_to_tokens(&member.ty)?;
-                let method_name =
-                    TokenStream::from_str(&self.default_method_name(parent_name, &member.name))?;
+                let method_name = self.default_method_name(parent_name, &member.name);
                 output.append_all(quote! {
                     fn #method_name() -> #ty {
                         #val
@@ -716,7 +719,7 @@ impl Rasn {
             ASN1Type::Real(_) => Ok(quote!(f64)),
             ASN1Type::BitString(_) => Ok(quote!(BitString)),
             ASN1Type::OctetString(_) => Ok(quote!(OctetString)),
-            ASN1Type::CharacterString(CharacterString { ty, .. }) => self.string_type(ty),
+            ASN1Type::CharacterString(c) => self.string_type(c.ty),
             ASN1Type::Enumerated(_) => Err(error!(
                 NotYetInplemented,
                 "Enumerated values are currently unsupported!"
@@ -741,10 +744,12 @@ impl Rasn {
                 NotYetInplemented,
                 "Set values are currently unsupported!"
             )),
-            ASN1Type::ElsewhereDeclaredType(e) => Ok(self.to_rust_title_case(&e.identifier)),
-            ASN1Type::InformationObjectFieldReference(_) => Err(error!(
+            ASN1Type::ElsewhereDeclaredType(e) => {
+                Ok(self.to_rust_qualified_type(e.module.as_deref(), &e.identifier))
+            }
+            ASN1Type::ObjectClassField(_) => Err(error!(
                 NotYetInplemented,
-                "Information Object field reference values are currently unsupported!"
+                "Object class field types are currently unsupported!"
             )),
             ASN1Type::Time(_) => Err(error!(
                 NotYetInplemented,
@@ -752,7 +757,7 @@ impl Rasn {
             )),
             ASN1Type::GeneralizedTime(_) => Ok(quote!(GeneralizedTime)),
             ASN1Type::UTCTime(_) => Ok(quote!(UtcTime)),
-            ASN1Type::EmbeddedPdv | ASN1Type::External => Ok(quote!(Any)),
+            ASN1Type::Any | ASN1Type::EmbeddedPdv | ASN1Type::External => Ok(quote!(Any)),
             ASN1Type::ChoiceSelectionType(c) => {
                 let choice = self.to_rust_title_case(&c.choice_name);
                 let option = self.to_rust_enum_identifier(&c.selected_option);
@@ -852,24 +857,7 @@ impl Rasn {
             | ASN1Value::ElsewhereDeclaredValue { identifier: e, .. } => {
                 Ok(self.to_rust_const_case(e).to_token_stream())
             }
-            ASN1Value::ObjectIdentifier(oid) => {
-                let arcs = oid
-                    .0
-                    .iter()
-                    .filter_map(|arc| {
-                        arc.number.map(|id| {
-                            u32::try_from(id)
-                                .map(|arc| arc.to_token_stream())
-                                .map_err(|_| GeneratorError {
-                                    top_level_declaration: None,
-                                    details: "OID arc out of u32 range".into(),
-                                    kind: GeneratorErrorType::Unsupported,
-                                })
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(quote!(Oid::const_new(&[#(#arcs),*]).to_owned()))
-            }
+            ASN1Value::ObjectIdentifier(oid) => self.format_oid(oid),
             ASN1Value::Time(t) => match type_name {
                 Some(time_type) => Ok(quote!(#t.parse::<#time_type>().unwrap())),
                 None => Ok(quote!(#t.parse::<_>().unwrap())),
@@ -901,10 +889,14 @@ impl Rasn {
                 integer_type,
                 value,
             } => {
-                let val = Literal::i128_unsuffixed(*value);
                 match integer_type {
-                    IntegerType::Unbounded => Ok(quote!(Integer::from(#val))),
-                    _ => Ok(val.to_token_stream()),
+                    IntegerType::Unbounded => {
+                        // Needs suffixed literal in case it is too large for an i32, which is what
+                        // Rust infers by default.
+                        let val = Literal::i128_suffixed(*value);
+                        Ok(quote!(Integer::from(#val)))
+                    }
+                    _ => Ok(Literal::i128_unsuffixed(*value).into_token_stream()),
                 }
             }
             ASN1Value::LinkedCharStringValue(string_type, value) => {
@@ -932,11 +924,15 @@ impl Rasn {
                     CharacterStringType::GraphicString => {
                         Ok(quote!(GraphicString::try_from(String::from(#val)).unwrap()))
                     }
-                    CharacterStringType::VideotexString
-                    | CharacterStringType::UniversalString
-                    | CharacterStringType::TeletexString => Err(GeneratorError::new(
+                    CharacterStringType::TeletexString => {
+                        Ok(quote!(TeletexString::try_from(#val).unwrap()))
+                    }
+                    CharacterStringType::UniversalString => {
+                        Ok(quote!(UniversalString::new(Utf8String::from(#val))))
+                    }
+                    CharacterStringType::VideotexString => Err(GeneratorError::new(
                         None,
-                        &format!("{:?} values are currently unsupported!", string_type),
+                        "VideotexString values are currently unsupported!",
                         GeneratorErrorType::NotYetInplemented,
                     )),
                 }
@@ -961,12 +957,75 @@ impl Rasn {
                 ..
             }) => {
                 Self::needs_unnesting(element_type)
-                    || element_type
-                        .constraints()
-                        .is_some_and(|c| c.is_empty().not())
+                    || !element_type.constraints().is_empty()
                     || element_tag.is_some()
             }
             _ => false,
+        }
+    }
+
+    pub(crate) fn format_oid(
+        &self,
+        oid: &ObjectIdentifierValue,
+    ) -> Result<TokenStream, GeneratorError> {
+        let arc_to_u32 = |id| {
+            u32::try_from(id)
+                .map(|arc| arc.to_token_stream())
+                .map_err(|_| GeneratorError {
+                    top_level_declaration: None,
+                    details: "OID arc out of u32 range".into(),
+                    kind: GeneratorErrorType::Unsupported,
+                })
+        };
+
+        let root = match oid.0.first().as_ref() {
+            Some(arc) if arc.name == Some("itu-t".into()) || arc.number == Some(0) => Some(0u8),
+            Some(arc) if arc.name == Some("iso".into()) || arc.number == Some(1) => Some(1u8),
+            _ => None,
+        };
+        let resolved_well_known_arcs = oid
+            .0
+            .clone()
+            .into_iter()
+            .map(|mut arc| {
+                if arc.number.is_none() {
+                    arc.number = ObjectIdentifierArc::well_known(arc.name.as_ref(), root);
+                }
+                arc
+            })
+            .collect::<Vec<_>>();
+        let contains_reference = resolved_well_known_arcs
+            .iter()
+            .any(|arc| arc.number.is_none());
+        if contains_reference {
+            let mut concatenated = Vec::new();
+            let mut arcs = Vec::new();
+            for arc in resolved_well_known_arcs.iter() {
+                match (&arc.name, arc.number) {
+                    (_, Some(n)) => arcs.push(arc_to_u32(n)?),
+                    (Some(n), None) => {
+                        if !arcs.is_empty() {
+                            concatenated.push(quote!(&[#(#arcs),*]));
+                        }
+                        arcs = Vec::new();
+                        let name = self.to_rust_const_case(n);
+                        concatenated.push(quote!(&***#name));
+                    }
+                    _ => unreachable!(
+                        "Lexer only parses OID arcs with at least a name or a numeral!"
+                    ),
+                }
+            }
+            if !arcs.is_empty() {
+                concatenated.push(quote!(&[#(#arcs),*]));
+            }
+            Ok(quote!(Oid::new(&[#(#concatenated),*].concat()).unwrap().to_owned()))
+        } else {
+            let arcs = resolved_well_known_arcs
+                .iter()
+                .filter_map(|arc| arc.number.map(arc_to_u32))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(quote!(Oid::const_new(&[#(#arcs),*]).to_owned()))
         }
     }
 
@@ -985,6 +1044,32 @@ impl Rasn {
             impl #name {
                 pub fn new(#(#args),*) -> Self {
                     Self { #(#instance),* }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn format_default_impl(
+        &self,
+        name: &str,
+        members: &[SequenceOrSetMember],
+    ) -> TokenStream {
+        if !members.iter().all(|m| m.optionality.default().is_some()) {
+            // All members must have a DEFAULT.
+            return TokenStream::new();
+        };
+
+        let name_ident = self.to_rust_title_case(name);
+        let field_inits = members.iter().map(|m| {
+            let field_name = self.to_rust_snake_case(&m.name);
+            let def_method_name = self.default_method_name(name, &m.name);
+            quote!( #field_name: #def_method_name() )
+        });
+
+        quote! {
+            impl std::default::Default for #name_ident {
+                fn default() -> Self {
+                    Self { #(#field_inits),* }
                 }
             }
         }
@@ -1012,23 +1097,7 @@ impl Rasn {
                 ASN1Type::GeneralizedTime(_) => Ok(quote!(GeneralizedTime)),
                 ASN1Type::UTCTime(_) => Ok(quote!(UtcTime)),
                 ASN1Type::ObjectIdentifier(_) => Ok(quote!(ObjectIdentifier)),
-                ASN1Type::CharacterString(cs) => match cs.ty {
-                    CharacterStringType::NumericString => Ok(quote!(NumericString)),
-                    CharacterStringType::VisibleString => Ok(quote!(VisibleString)),
-                    CharacterStringType::IA5String => Ok(quote!(IA5String)),
-                    CharacterStringType::UTF8String => Ok(quote!(UTF8String)),
-                    CharacterStringType::BMPString => Ok(quote!(BMPString)),
-                    CharacterStringType::PrintableString => Ok(quote!(PrintableString)),
-                    CharacterStringType::GeneralString => Ok(quote!(GeneralString)),
-                    CharacterStringType::GraphicString => Ok(quote!(GraphicString)),
-                    CharacterStringType::VideotexString
-                    | CharacterStringType::UniversalString
-                    | CharacterStringType::TeletexString => Err(GeneratorError::new(
-                        None,
-                        &format!("{:?} values are currently unsupported!", cs.ty),
-                        GeneratorErrorType::NotYetInplemented,
-                    )),
-                },
+                ASN1Type::CharacterString(cs) => self.string_type(cs.ty),
                 _ => Ok(self.to_rust_title_case(&ty.as_str())),
             }
         } else {
@@ -1039,7 +1108,7 @@ impl Rasn {
     /// Resolves the custom syntax declared in an information object class' WITH SYNTAX clause
     pub(crate) fn resolve_standard_syntax(
         &self,
-        class: &InformationObjectClass,
+        class: &ObjectClassDefn,
         application: &[InformationObjectField],
     ) -> Result<(ASN1Value, Vec<(usize, ASN1Type)>), GeneratorError> {
         let mut key = None;
@@ -1071,7 +1140,7 @@ impl Rasn {
                         }
                         InformationObjectField::ObjectSetField(_) => todo!(),
                     }
-                } else if !class_field.is_optional {
+                } else if class_field.optionality == Optionality::Required {
                     return Err(GeneratorError {
                         top_level_declaration: None,
                         details: "Syntax mismatch while resolving information object.".to_string(),
@@ -1094,8 +1163,6 @@ impl Rasn {
         }
     }
 
-    const REQUIRED_DERIVES: [&'static str; 6] =
-        ["Debug", "AsnType", "Encode", "Decode", "PartialEq", "Clone"];
     const COPY_DERIVE: &str = "Copy";
     const RUST_KEYWORDS: [&'static str; 53] = [
         "as",
@@ -1212,28 +1279,39 @@ impl Rasn {
         TokenStream::from_str(&name).unwrap()
     }
 
+    /// Generate a `TokenStream` containing a type identifier, optionally qualified by module.
+    ///
+    /// Module name is converted to snake case, and type name converted to title case.
+    ///
+    /// If qualified with a module, then path is `super::#module::#ty`, else it is just `#ty`.
+    pub(crate) fn to_rust_qualified_type(&self, module: Option<&str>, ty: &str) -> TokenStream {
+        let ty = self.to_rust_title_case(ty);
+        if let Some(module) = module {
+            let module = self.to_rust_snake_case(module).to_token_stream();
+            quote!(super::#module::#ty)
+        } else {
+            ty
+        }
+    }
+
     pub(super) fn format_name_and_common_annotations(
         &self,
         tld: &ToplevelTypeDefinition,
-    ) -> Result<(TokenStream, Vec<TokenStream>), GeneratorError> {
+    ) -> (TokenStream, Vec<TokenStream>) {
         let name = self.to_rust_title_case(&tld.name);
-        let mut annotations = vec![quote!(delegate), self.format_tag(tld.tag.as_ref(), false)];
+        let mut annotations = vec![quote!(delegate), self.format_tag(tld.tag.as_ref())];
 
         if name.to_string() != tld.name {
             annotations.push(self.format_identifier_annotation(&tld.name, &tld.comments, &tld.ty));
         }
 
-        Ok((name, annotations))
+        (name, annotations)
     }
 
     fn required_annotations(&self, needs_copy: bool) -> Result<Vec<TokenStream>, GeneratorError> {
-        let mut required_derives = Vec::new();
-        for derive in Self::REQUIRED_DERIVES {
-            if !self.derive_is_present(derive)? {
-                required_derives.push(derive)
-            }
-        }
-        if needs_copy && !self.derive_is_present(Self::COPY_DERIVE)? {
+        let mut required_derives: Vec<_> =
+            self.required_derives.iter().map(String::as_str).collect();
+        if needs_copy && !required_derives.contains(&Self::COPY_DERIVE) {
             required_derives.push(Self::COPY_DERIVE);
         }
         let mut custom_annotations = self
@@ -1260,29 +1338,14 @@ impl Rasn {
         Ok(custom_annotations)
     }
 
-    fn derive_is_present(&self, annotation: &str) -> Result<bool, GeneratorError> {
-        let regex = regex::Regex::from_str(&format!(
-            r#"#\[derive\([0-z \t,]*{annotation}[0-z \t,]*\)\]"#
-        ))
-        .map_err(|e| GeneratorError {
-            details: e.to_string(),
-            ..Default::default()
-        })?;
-        Ok(self
-            .config
-            .type_annotations
-            .iter()
-            .any(|s| regex.is_match(s)))
-    }
-
     pub(super) fn type_mismatch_error<T>(
         &self,
         tld: ToplevelTypeDefinition,
-        expected_type: &str
+        expected_type: &str,
     ) -> Result<T, GeneratorError> {
         Err(GeneratorError::new(
             Some(ToplevelDefinition::Type(tld)),
-            &format!("Expected {} top-level declaration", expected_type),
+            &format!("Expected {expected_type} top-level declaration"),
             GeneratorErrorType::Asn1TypeMismatch,
         ))
     }
@@ -1357,7 +1420,7 @@ mod tests {
     use quote::quote;
 
     use crate::intermediate::{
-        constraints::ElementSet,
+        constraints::ElementSetSpecs,
         types::{Boolean, Enumeral, Integer},
         AsnTag,
     };
@@ -1374,8 +1437,8 @@ mod tests {
             TaggingEnvironment::Automatic,
             ExtensibilityEnvironment::Explicit,
         );
-        assert!(!rasn.derive_is_present("NotPresent").unwrap());
-        assert!(rasn.derive_is_present("AsnType").unwrap());
+        assert!(!rasn.required_derives.contains(&String::from("NotPresent")));
+        assert!(rasn.required_derives.contains(&String::from("AsnType")));
     }
 
     #[test]
@@ -1404,14 +1467,11 @@ mod tests {
                 .join_annotations(
                     vec![
                         quote!(delegate),
-                        generator.format_tag(
-                            Some(&AsnTag {
-                                tag_class: crate::intermediate::TagClass::Application,
-                                environment: crate::intermediate::TaggingEnvironment::Explicit,
-                                id: 3,
-                            }),
-                            false,
-                        ),
+                        generator.format_tag(Some(&AsnTag {
+                            tag_class: crate::intermediate::TagClass::Application,
+                            environment: crate::intermediate::TaggingEnvironment::Explicit,
+                            id: 3,
+                        })),
                     ],
                     false,
                     false
@@ -1441,8 +1501,7 @@ mod tests {
                                 ty: ASN1Type::Boolean(Boolean {
                                     constraints: vec![]
                                 }),
-                                default_value: None,
-                                is_optional: true,
+                                optionality: Optionality::Optional,
                                 constraints: vec![]
                             },
                             SequenceOrSetMember {
@@ -1451,23 +1510,22 @@ mod tests {
                                 tag: None,
                                 ty: ASN1Type::Integer(Integer {
                                     distinguished_values: None,
-                                    constraints: vec![Constraint::SubtypeConstraint(ElementSet {
+                                    constraints: vec![Constraint::Subtype(ElementSetSpecs {
                             extensible: false,
                             set: crate::intermediate::constraints::ElementOrSetOperation::Element(
-                                crate::intermediate::constraints::SubtypeElement::SingleValue {
+                                crate::intermediate::constraints::SubtypeElements::SingleValue {
                                     value: ASN1Value::Integer(4),
                                     extensible: true
                                 }
                             )
                         })]
                                 }),
-                                default_value: Some(ASN1Value::Integer(4)),
-                                is_optional: true,
+                                optionality: Optionality::Default(ASN1Value::Integer(4)),
                                 constraints: vec![]
                             }
                         ]
                     },
-                    &"Parent".into(),
+                    "Parent",
                 )
                 .unwrap()
                 .struct_body
@@ -1546,10 +1604,10 @@ is_recursive: false,
                             tag: None,
                             ty: ASN1Type::Integer(Integer {
                                 distinguished_values: None,
-                                constraints: vec![Constraint::SubtypeConstraint(ElementSet {
+                                constraints: vec![Constraint::Subtype(ElementSetSpecs {
                                     extensible: false,
                                     set: crate::intermediate::constraints::ElementOrSetOperation::Element(
-                                        crate::intermediate::constraints::SubtypeElement::SingleValue {
+                                        crate::intermediate::constraints::SubtypeElements::SingleValue {
                                             value: ASN1Value::Integer(4),
                                             extensible: true
                                         }
@@ -1560,7 +1618,7 @@ is_recursive: false,
                         }
                     ]
                 },
-                &"Parent".into(),
+                "Parent",
             )
             .unwrap()
             .enum_body
@@ -1656,11 +1714,11 @@ is_recursive: false,
     fn detects_fixed_octet_string() {
         assert_eq!(
             OctetString {
-                constraints: vec![Constraint::SubtypeConstraint(ElementSet {
+                constraints: vec![Constraint::Subtype(ElementSetSpecs {
                     set: constraints::ElementOrSetOperation::Element(
-                        constraints::SubtypeElement::SizeConstraint(Box::new(
+                        constraints::SubtypeElements::SizeConstraint(Box::new(
                             constraints::ElementOrSetOperation::Element(
-                                constraints::SubtypeElement::SingleValue {
+                                constraints::SubtypeElements::SingleValue {
                                     value: ASN1Value::Integer(4),
                                     extensible: false,
                                 },
@@ -1675,11 +1733,11 @@ is_recursive: false,
         );
         assert_eq!(
             OctetString {
-                constraints: vec![Constraint::SubtypeConstraint(ElementSet {
+                constraints: vec![Constraint::Subtype(ElementSetSpecs {
                     set: constraints::ElementOrSetOperation::Element(
-                        constraints::SubtypeElement::SizeConstraint(Box::new(
+                        constraints::SubtypeElements::SizeConstraint(Box::new(
                             constraints::ElementOrSetOperation::Element(
-                                constraints::SubtypeElement::ValueRange {
+                                constraints::SubtypeElements::ValueRange {
                                     min: Some(ASN1Value::Integer(1)),
                                     max: Some(ASN1Value::Integer(4)),
                                     extensible: false
@@ -1699,6 +1757,94 @@ is_recursive: false,
             }
             .fixed_size(),
             None
+        );
+    }
+
+    #[test]
+    fn formats_empty_oid() {
+        assert_eq!(
+            quote!(Oid::const_new(&[]).to_owned()).to_string(),
+            Rasn::default()
+                .format_oid(&ObjectIdentifierValue(vec![]))
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn formats_numeric_oid() {
+        assert_eq!(
+            quote!(Oid::const_new(&[42u32, 12u32]).to_owned()).to_string(),
+            Rasn::default()
+                .format_oid(&ObjectIdentifierValue(vec![
+                    ObjectIdentifierArc {
+                        name: Some("identifier".into()),
+                        number: Some(42)
+                    },
+                    ObjectIdentifierArc {
+                        name: None,
+                        number: Some(12)
+                    },
+                ]))
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn formats_oid_with_references() {
+        assert_eq!(
+            quote!(
+                Oid::new(&[&[42u32, 12u32], &***REFERENCE, &[42u32]].concat())
+                    .unwrap()
+                    .to_owned()
+            )
+            .to_string(),
+            Rasn::default()
+                .format_oid(&ObjectIdentifierValue(vec![
+                    ObjectIdentifierArc {
+                        name: Some("identifier".into()),
+                        number: Some(42)
+                    },
+                    ObjectIdentifierArc {
+                        name: None,
+                        number: Some(12)
+                    },
+                    ObjectIdentifierArc {
+                        name: Some("reference".into()),
+                        number: None
+                    },
+                    ObjectIdentifierArc {
+                        name: Some("identifier".into()),
+                        number: Some(42)
+                    },
+                ]))
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn formats_oid_with_well_known_references() {
+        assert_eq!(
+            quote!(Oid::const_new(&[1u32, 2u32, 42u32]).to_owned()).to_string(),
+            Rasn::default()
+                .format_oid(&ObjectIdentifierValue(vec![
+                    ObjectIdentifierArc {
+                        name: Some("iso".into()),
+                        number: None
+                    },
+                    ObjectIdentifierArc {
+                        name: Some("member-body".into()),
+                        number: None
+                    },
+                    ObjectIdentifierArc {
+                        name: Some("identifier".into()),
+                        number: Some(42)
+                    },
+                ]))
+                .unwrap()
+                .to_string()
         );
     }
 }

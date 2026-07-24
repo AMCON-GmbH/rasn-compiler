@@ -29,9 +29,7 @@ use crate::{
 
 use self::{
     error::{LinkerError, LinkerErrorType},
-    information_object::{
-        ASN1Information, InformationObjectClass, InformationObjectClassField, ObjectSet,
-    },
+    information_object::{ASN1Information, InformationObjectClassField},
 };
 
 pub struct Validator {
@@ -65,17 +63,15 @@ impl Validator {
         while let Some(key) = keys.pop() {
             if matches![
                 self.tlds.get(&key),
-                Some(ToplevelDefinition::Information(
-                    ToplevelInformationDefinition {
-                        value: ASN1Information::ObjectSet(ObjectSet { .. }),
-                        ..
-                    }
-                ))
+                Some(ToplevelDefinition::Object(ToplevelInformationDefinition {
+                    value: ASN1Information::ObjectSet(_),
+                    ..
+                }))
             ] {
                 let mut item = self.tlds.remove_entry(&key);
                 if let Some((
                     _,
-                    ToplevelDefinition::Information(ToplevelInformationDefinition {
+                    ToplevelDefinition::Object(ToplevelInformationDefinition {
                         value: ASN1Information::ObjectSet(set),
                         ..
                     }),
@@ -96,9 +92,9 @@ impl Validator {
                         tld.ty = tld.ty.resolve_class_reference(&self.tlds);
                         self.tlds.insert(k, ToplevelDefinition::Type(tld));
                     }
-                    Some((k, ToplevelDefinition::Information(mut tld))) => {
+                    Some((k, ToplevelDefinition::Object(mut tld))) => {
                         tld = tld.resolve_class_reference(&self.tlds);
-                        self.tlds.insert(k, ToplevelDefinition::Information(tld));
+                        self.tlds.insert(k, ToplevelDefinition::Object(tld));
                     }
                     _ => (),
                 }
@@ -119,11 +115,10 @@ impl Validator {
                 }
             }
             if self.references_object_set_by_name(&key) {
-                if let Some((k, ToplevelDefinition::Information(mut tld))) =
-                    self.tlds.remove_entry(&key)
+                if let Some((k, ToplevelDefinition::Object(mut tld))) = self.tlds.remove_entry(&key)
                 {
                     tld.value.link_object_set_reference(&self.tlds);
-                    self.tlds.insert(k, ToplevelDefinition::Information(tld));
+                    self.tlds.insert(k, ToplevelDefinition::Object(tld));
                 }
             }
             if self.has_constraint_reference(&key) {
@@ -162,7 +157,7 @@ impl Validator {
             if self
                 .tlds
                 .get(&key)
-                .and_then(ToplevelDefinition::get_module_reference)
+                .and_then(ToplevelDefinition::get_module_header)
                 .is_some_and(|m| visited_headers.contains(&m.borrow().name).not())
             {
                 self.fill_in_associated_type_imports(key, &mut visited_headers);
@@ -179,36 +174,34 @@ impl Validator {
     ) {
         let tld = self.tlds.remove(&key).unwrap();
         {
-            let mod_ref = tld.get_module_reference().unwrap();
+            let module_header = tld.get_module_header().unwrap();
 
             let mut associated_type_imports = Vec::new();
-            if let ToplevelDefinition::Information(ToplevelInformationDefinition {
-                class: Some(ClassLink::ByReference(ref class_ref)),
+            if let ToplevelDefinition::Object(ToplevelInformationDefinition {
+                class: ClassLink::ByReference(ref class_ref),
                 ..
             }) = tld
             {
                 for field in &class_ref.fields {
                     self.associated_import_type_class_field(
                         field,
-                        mod_ref.clone(),
+                        module_header.clone(),
                         &mut associated_type_imports,
                     );
                 }
             }
-            for import_modules in &mod_ref.borrow().imports {
+            for import_modules in &module_header.borrow().imports {
                 for import in &import_modules.types {
                     if import.starts_with(|c: char| c.is_lowercase()) {
                         match self.tlds.get(import) {
-                            Some(ToplevelDefinition::Information(
-                                ToplevelInformationDefinition {
-                                    class: Some(ClassLink::ByReference(class_ref)),
-                                    ..
-                                },
-                            )) => {
+                            Some(ToplevelDefinition::Object(ToplevelInformationDefinition {
+                                class: ClassLink::ByReference(class_ref),
+                                ..
+                            })) => {
                                 for field in &class_ref.fields {
                                     self.associated_import_type_class_field(
                                         field,
-                                        mod_ref.clone(),
+                                        module_header.clone(),
                                         &mut associated_type_imports,
                                     );
                                 }
@@ -219,7 +212,7 @@ impl Validator {
                             })) => {
                                 self.associated_import_type(
                                     associated_type.as_str().as_ref(),
-                                    mod_ref.clone(),
+                                    module_header.clone(),
                                     &mut associated_type_imports,
                                 );
                             }
@@ -229,8 +222,8 @@ impl Validator {
                 }
             }
             for mut import in associated_type_imports {
-                let mut mut_mod_ref = mod_ref.borrow_mut();
-                if let Some(mod_imports) = mut_mod_ref
+                let mut mut_module_header = module_header.borrow_mut();
+                if let Some(mod_imports) = mut_module_header
                     .imports
                     .iter_mut()
                     .find(|i| i.global_module_reference == import.global_module_reference)
@@ -239,11 +232,11 @@ impl Validator {
                         mod_imports.types.push(std::mem::take(&mut import.types[0]));
                     }
                 } else {
-                    mut_mod_ref.imports.push(import);
+                    mut_module_header.imports.push(import);
                 }
             }
 
-            visited_headers.insert(mod_ref.borrow().name.clone());
+            visited_headers.insert(module_header.borrow().name.clone());
         }
         self.tlds.insert(key, tld);
     }
@@ -251,26 +244,26 @@ impl Validator {
     fn associated_import_type(
         &self,
         associated_type: &str,
-        mod_ref: Rc<RefCell<ModuleReference>>,
+        module_header: Rc<RefCell<ModuleHeader>>,
         associated_type_imports: &mut Vec<Import>,
     ) {
         if let Some(ToplevelDefinition::Type(ToplevelTypeDefinition {
             name,
             parameterization,
-            index: Some((m_ref, _)),
+            module_header: Some(m_hdr),
             ..
         })) = self.tlds.get(associated_type)
         {
             let v_type_name = format!("{}{}", name, parameterization.as_ref().map_or("", |_| "{}"));
-            let v_type_mod_name = &m_ref.borrow().name;
-            if v_type_mod_name != &mod_ref.borrow().name
-                && mod_ref.borrow().find_import(&v_type_name).is_none()
+            let v_type_mod_name = &m_hdr.borrow().name;
+            if v_type_mod_name != &module_header.borrow().name
+                && module_header.borrow().find_import(&v_type_name).is_none()
             {
                 associated_type_imports.push(Import {
                     types: vec![v_type_name],
                     global_module_reference: GlobalModuleReference {
-                        module_reference: m_ref.borrow().name.clone(),
-                        assigned_identifier: match &m_ref.borrow().module_identifier {
+                        module_reference: m_hdr.borrow().name.clone(),
+                        assigned_identifier: match &m_hdr.borrow().module_identifier {
                             Some(DefinitiveIdentifier::DefinitiveOID(oid))
                             | Some(DefinitiveIdentifier::DefinitiveOIDandIRI { oid, .. }) => {
                                 AssignedIdentifier::ObjectIdentifierValue(oid.clone())
@@ -287,7 +280,7 @@ impl Validator {
     fn associated_import_type_class_field(
         &self,
         field: &InformationObjectClassField,
-        mod_ref: Rc<RefCell<ModuleReference>>,
+        module_header: Rc<RefCell<ModuleHeader>>,
         associated_type_imports: &mut Vec<Import>,
     ) {
         if let Some(ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
@@ -296,18 +289,16 @@ impl Validator {
             ..
         })) = &field.ty
         {
-            if let Some(ToplevelDefinition::Information(ToplevelInformationDefinition {
-                value: ASN1Information::ObjectClass(InformationObjectClass { fields, .. }),
-                ..
-            })) = self.tlds.get(class_id)
-            {
-                if let Some(field) = fields
+            if let Some(ToplevelDefinition::Class(class)) = self.tlds.get(class_id) {
+                if let Some(field) = class
+                    .definition
+                    .fields
                     .iter()
                     .find(|f| f.identifier.identifier() == identifier)
                 {
                     self.associated_import_type_class_field(
                         field,
-                        mod_ref,
+                        module_header,
                         associated_type_imports,
                     );
                 }
@@ -317,7 +308,7 @@ impl Validator {
             ..
         })) = &field.ty
         {
-            self.associated_import_type(identifier, mod_ref, associated_type_imports)
+            self.associated_import_type(identifier, module_header, associated_type_imports)
         }
     }
 
@@ -334,10 +325,10 @@ impl Validator {
             .get(key)
             .map(|t| match t {
                 ToplevelDefinition::Type(t) => t.ty.references_class_by_name(),
-                ToplevelDefinition::Information(i) => i.class.as_ref().is_some_and(|c| match c {
+                ToplevelDefinition::Object(i) => match i.class {
                     ClassLink::ByReference(_) => false,
                     ClassLink::ByName(_) => true,
-                }),
+                },
                 _ => false,
             })
             .unwrap_or(false)
@@ -347,9 +338,9 @@ impl Validator {
         self.tlds
             .get(key)
             .map(|t| match t {
-                ToplevelDefinition::Information(ToplevelInformationDefinition {
-                    value, ..
-                }) => value.references_object_set_by_name(),
+                ToplevelDefinition::Object(ToplevelInformationDefinition { value, .. }) => {
+                    value.references_object_set_by_name()
+                }
                 _ => false,
             })
             .unwrap_or(false)
@@ -408,7 +399,8 @@ impl Validate for ToplevelDefinition {
                 Ok(())
             }
             ToplevelDefinition::Value(_v) => Ok(()),
-            ToplevelDefinition::Information(_i) => Ok(()),
+            ToplevelDefinition::Class(_c) => Ok(()),
+            ToplevelDefinition::Object(_o) => Ok(()),
             ToplevelDefinition::Macro(_m) => Ok(()),
         }
     }
@@ -454,8 +446,8 @@ impl Validate for CharacterString {
 
 impl Validate for Constraint {
     fn validate(&self) -> Result<(), LinkerError> {
-        if let Constraint::SubtypeConstraint(c) = self {
-            if let ElementOrSetOperation::Element(SubtypeElement::ValueRange {
+        if let Constraint::Subtype(c) = self {
+            if let ElementOrSetOperation::Element(SubtypeElements::ValueRange {
                 min,
                 max,
                 extensible: _,

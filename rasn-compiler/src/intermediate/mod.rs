@@ -15,17 +15,25 @@ pub mod parameterization;
 pub mod types;
 pub mod utils;
 
-use std::{borrow::Cow, cell::RefCell, collections::BTreeMap, ops::Add, rc::Rc};
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    collections::BTreeMap,
+    ops::Add,
+    rc::Rc,
+    sync::LazyLock,
+};
 
 use crate::common::INTERNAL_IO_FIELD_REF_TYPE_NAME_PREFIX;
 use constraints::Constraint;
 use error::{GrammarError, GrammarErrorType};
-use information_object::{InformationObjectFieldReference, ToplevelInformationDefinition};
+use information_object::{
+    ObjectClassAssignment, ObjectClassFieldType, ToplevelInformationDefinition,
+};
 #[cfg(test)]
 use internal_macros::EnumDebug;
 use macros::ToplevelMacroDefinition;
 use parameterization::Parameterization;
-use quote::{quote, ToTokens, TokenStreamExt};
 use types::*;
 
 #[cfg(doc)]
@@ -58,6 +66,7 @@ pub const UTF8_STRING: &str = "UTF8String";
 pub const NUMERIC_STRING: &str = "NumericString";
 pub const VISIBLE_STRING: &str = "VisibleString";
 pub const TELETEX_STRING: &str = "TeletexString";
+pub const T61_STRING: &str = "T61String";
 pub const VIDEOTEX_STRING: &str = "VideotexString";
 pub const GRAPHIC_STRING: &str = "GraphicString";
 pub const GENERAL_STRING: &str = "GeneralString";
@@ -76,6 +85,9 @@ pub const ALL: &str = "ALL";
 pub const SET: &str = "SET";
 pub const OBJECT_IDENTIFIER: &str = "OBJECT IDENTIFIER";
 pub const COMPONENTS_OF: &str = "COMPONENTS OF";
+pub const ANY: &str = "ANY";
+pub const DEFINED: &str = "DEFINED";
+pub const BY: &str = "BY";
 
 // Tagging tokens
 pub const UNIVERSAL: &str = "UNIVERSAL";
@@ -167,7 +179,7 @@ pub const TIME_OF_DAY: &str = "TIME-OF-DAY";
 pub const TYPE_IDENTIFIER: &str = "TYPE-IDENTIFIER";
 pub const ENCODING_CONTROL: &str = "ENCODING-CONTROL";
 
-pub const ASN1_KEYWORDS: [&str; 64] = [
+pub const ASN1_KEYWORDS: [&str; 67] = [
     ABSTRACT_SYNTAX,
     BIT,
     CHARACTER,
@@ -232,6 +244,9 @@ pub const ASN1_KEYWORDS: [&str; 64] = [
     INSTRUCTIONS,
     TAGS,
     MACRO,
+    ANY,
+    BY,
+    DEFINED,
 ];
 
 macro_rules! grammar_error {
@@ -402,7 +417,7 @@ impl From<(ObjectIdentifierValue, Option<&str>)> for DefinitiveIdentifier {
 /// Represents a module header as specified in
 /// Rec. ITU-T X.680 (02/2021) § 13
 #[derive(Debug, Clone, PartialEq)]
-pub struct ModuleReference {
+pub struct ModuleHeader {
     pub name: String,
     pub module_identifier: Option<DefinitiveIdentifier>,
     pub encoding_reference_default: Option<EncodingReferenceDefault>,
@@ -412,7 +427,7 @@ pub struct ModuleReference {
     pub exports: Option<Exports>,
 }
 
-impl ModuleReference {
+impl ModuleHeader {
     /// Returns an import that matches a given identifier, if present.
     pub fn find_import(&self, identifier: &str) -> Option<&String> {
         self.imports
@@ -432,7 +447,7 @@ impl
         )>,
         Option<Exports>,
         Option<Vec<Import>>,
-    )> for ModuleReference
+    )> for ModuleHeader
 {
     fn from(
         value: (
@@ -484,6 +499,43 @@ pub struct ObjectIdentifierArc {
     pub number: Option<u128>,
 }
 
+impl ObjectIdentifierArc {
+    const ITU_T: u128 = 0;
+    const ISO: u128 = 1;
+    const JOINT_ISO_ITU_T: u128 = 2;
+    const JOINT_ISO_CCITT: u128 = 2;
+    const RECOMMENDATION: u128 = 0;
+    const QUESTION: u128 = 1;
+    const ADMINISTRATION: u128 = 2;
+    const NETWORK_OPERATOR: u128 = 3;
+    const ITU_T_IDENTIFIED_ORGANIZATION: u128 = 4;
+    const R_RECOMMENDATION: u128 = 5;
+    const STANDARD: u128 = 0;
+    const REGISTRATION_AUTHORITY: u128 = 1;
+    const MEMBER_BODY: u128 = 2;
+    const ISO_IDENTIFIED_ORGANIZATION: u128 = 3;
+
+    pub(crate) fn well_known(name: Option<&String>, root: Option<u8>) -> Option<u128> {
+        match (root, name.map(|s| s.as_str())) {
+            (_, Some("itu-t")) => Some(Self::ITU_T),
+            (_, Some("iso")) => Some(Self::ISO),
+            (_, Some("joint-iso-itu-t")) => Some(Self::JOINT_ISO_ITU_T),
+            (_, Some("joint-iso-ccitt")) => Some(Self::JOINT_ISO_CCITT),
+            (Some(0), Some("recommendation")) => Some(Self::RECOMMENDATION),
+            (Some(0), Some("question")) => Some(Self::QUESTION),
+            (Some(0), Some("administration")) => Some(Self::ADMINISTRATION),
+            (Some(0), Some("network-operator")) => Some(Self::NETWORK_OPERATOR),
+            (Some(0), Some("identified-organization")) => Some(Self::ITU_T_IDENTIFIED_ORGANIZATION),
+            (Some(0), Some("r-recommendation")) => Some(Self::R_RECOMMENDATION),
+            (Some(1), Some("standard")) => Some(Self::STANDARD),
+            (Some(1), Some("registration-authority")) => Some(Self::REGISTRATION_AUTHORITY),
+            (Some(1), Some("member-body")) => Some(Self::MEMBER_BODY),
+            (Some(1), Some("identified-organization")) => Some(Self::ISO_IDENTIFIED_ORGANIZATION),
+            _ => None,
+        }
+    }
+}
+
 impl From<u128> for ObjectIdentifierArc {
     fn from(value: u128) -> Self {
         Self {
@@ -524,8 +576,10 @@ pub enum ToplevelDefinition {
     Type(ToplevelTypeDefinition),
     /// Definition for a value using custom or built-in type.
     Value(ToplevelValueDefinition),
-    /// Definition for an abstraction concept introduced in ITU-T X.681.
-    Information(ToplevelInformationDefinition),
+    /// Definition for a object class as introduced in ITU-T X.681 9.
+    Class(ObjectClassAssignment),
+    /// Definition for an object or object set, as introduced in ITU-T X.681 11.
+    Object(ToplevelInformationDefinition),
     /// Definition for a macro.
     Macro(ToplevelMacroDefinition),
 }
@@ -547,42 +601,33 @@ impl ToplevelDefinition {
         }
     }
 
-    pub(crate) fn set_index(
-        &mut self,
-        module_reference: Rc<RefCell<ModuleReference>>,
-        item_no: usize,
-    ) {
+    pub(crate) fn set_module_header(&mut self, module_header: Rc<RefCell<ModuleHeader>>) {
         match self {
             ToplevelDefinition::Type(ref mut t) => {
-                t.index = Some((module_reference, item_no));
+                t.module_header = Some(module_header);
             }
             ToplevelDefinition::Value(ref mut v) => {
-                v.index = Some((module_reference, item_no));
+                v.module_header = Some(module_header);
             }
-            ToplevelDefinition::Information(ref mut i) => {
-                i.index = Some((module_reference, item_no));
+            ToplevelDefinition::Class(ref mut c) => {
+                c.module_header = Some(module_header);
+            }
+            ToplevelDefinition::Object(ref mut o) => {
+                o.module_header = Some(module_header);
             }
             ToplevelDefinition::Macro(ref mut m) => {
-                m.index = Some((module_reference, item_no));
+                m.module_header = Some(module_header);
             }
         }
     }
 
-    pub(crate) fn get_index(&self) -> Option<&(Rc<RefCell<ModuleReference>>, usize)> {
+    pub(crate) fn get_module_header(&self) -> Option<Rc<RefCell<ModuleHeader>>> {
         match self {
-            ToplevelDefinition::Type(ref t) => t.index.as_ref(),
-            ToplevelDefinition::Value(ref v) => v.index.as_ref(),
-            ToplevelDefinition::Information(ref i) => i.index.as_ref(),
-            ToplevelDefinition::Macro(ref m) => m.index.as_ref(),
-        }
-    }
-
-    pub(crate) fn get_module_reference(&self) -> Option<Rc<RefCell<ModuleReference>>> {
-        match self {
-            ToplevelDefinition::Type(ref t) => t.index.as_ref().map(|(m, _)| m.clone()),
-            ToplevelDefinition::Value(ref v) => v.index.as_ref().map(|(m, _)| m.clone()),
-            ToplevelDefinition::Information(ref i) => i.index.as_ref().map(|(m, _)| m.clone()),
-            ToplevelDefinition::Macro(ref m) => m.index.as_ref().map(|(m, _)| m.clone()),
+            ToplevelDefinition::Type(ref t) => t.module_header.as_ref().cloned(),
+            ToplevelDefinition::Value(ref v) => v.module_header.as_ref().cloned(),
+            ToplevelDefinition::Class(ref c) => c.module_header.as_ref().cloned(),
+            ToplevelDefinition::Object(ref o) => o.module_header.as_ref().cloned(),
+            ToplevelDefinition::Macro(ref m) => m.module_header.as_ref().cloned(),
         }
     }
 
@@ -628,7 +673,7 @@ impl ToplevelDefinition {
     ///                 distinguished_values: None,
     ///             }),
     ///             value: ASN1Value::Integer(42),
-    ///             index: None,
+    ///             module_header: None,
     ///         }
     ///     ).name(),
     ///     &String::from("the-answer")
@@ -636,7 +681,8 @@ impl ToplevelDefinition {
     /// ```
     pub fn name(&self) -> &String {
         match self {
-            ToplevelDefinition::Information(i) => &i.name,
+            ToplevelDefinition::Class(c) => &c.name,
+            ToplevelDefinition::Object(o) => &o.name,
             ToplevelDefinition::Type(t) => &t.name,
             ToplevelDefinition::Value(v) => &v.name,
             ToplevelDefinition::Macro(v) => &v.name,
@@ -653,7 +699,7 @@ pub struct ToplevelValueDefinition {
     pub associated_type: ASN1Type,
     pub parameterization: Option<Parameterization>,
     pub value: ASN1Value,
-    pub index: Option<(Rc<RefCell<ModuleReference>>, usize)>,
+    pub module_header: Option<Rc<RefCell<ModuleHeader>>>,
 }
 
 impl From<(&str, ASN1Value, ASN1Type)> for ToplevelValueDefinition {
@@ -664,7 +710,7 @@ impl From<(&str, ASN1Value, ASN1Type)> for ToplevelValueDefinition {
             associated_type: value.2.to_owned(),
             parameterization: None,
             value: value.1,
-            index: None,
+            module_header: None,
         }
     }
 }
@@ -693,7 +739,7 @@ impl
             parameterization: value.2,
             associated_type: value.3,
             value: value.4,
-            index: None,
+            module_header: None,
         }
     }
 }
@@ -705,7 +751,7 @@ pub struct ToplevelTypeDefinition {
     pub name: String,
     pub ty: ASN1Type,
     pub parameterization: Option<Parameterization>,
-    pub index: Option<(Rc<RefCell<ModuleReference>>, usize)>,
+    pub module_header: Option<Rc<RefCell<ModuleHeader>>>,
 }
 
 impl ToplevelTypeDefinition {
@@ -722,7 +768,7 @@ impl From<(&str, ASN1Type)> for ToplevelTypeDefinition {
             name: value.0.to_owned(),
             ty: value.1,
             parameterization: None,
-            index: None,
+            module_header: None,
         }
     }
 }
@@ -749,7 +795,7 @@ impl
             parameterization: value.2,
             ty: value.3 .1,
             tag: value.3 .0,
-            index: None,
+            module_header: None,
         }
     }
 }
@@ -777,10 +823,11 @@ pub enum ASN1Type {
     Time(Time),
     GeneralizedTime(GeneralizedTime),
     UTCTime(UTCTime),
+    Any,
     ElsewhereDeclaredType(DeclarationElsewhere),
     ChoiceSelectionType(ChoiceSelectionType),
     ObjectIdentifier(ObjectIdentifier),
-    InformationObjectFieldReference(InformationObjectFieldReference),
+    ObjectClassField(ObjectClassFieldType),
     EmbeddedPdv,
     External,
 }
@@ -847,12 +894,13 @@ impl ASN1Type {
             ASN1Type::Time(_) => Cow::Borrowed(TIME),
             ASN1Type::GeneralizedTime(_) => Cow::Borrowed(GENERALIZED_TIME),
             ASN1Type::UTCTime(_) => Cow::Borrowed(UTC_TIME),
+            ASN1Type::Any => Cow::Borrowed(ANY),
             ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere { identifier, .. }) => {
                 Cow::Borrowed(identifier)
             }
             ASN1Type::ChoiceSelectionType(_) => todo!(),
             ASN1Type::ObjectIdentifier(_) => Cow::Borrowed(OBJECT_IDENTIFIER),
-            ASN1Type::InformationObjectFieldReference(ifr) => Cow::Owned(format!(
+            ASN1Type::ObjectClassField(ifr) => Cow::Owned(format!(
                 "{INTERNAL_IO_FIELD_REF_TYPE_NAME_PREFIX}{}${}",
                 ifr.class,
                 ifr.field_path_as_str()
@@ -862,112 +910,38 @@ impl ASN1Type {
         }
     }
 
-    pub fn builtin_or_elsewhere(
-        parent: Option<&str>,
-        identifier: &str,
-        constraints: Option<Vec<Constraint>>,
-    ) -> ASN1Type {
-        match (parent, identifier) {
-            (None, NULL) => ASN1Type::Null,
-            (None, BOOLEAN) => ASN1Type::Boolean(Boolean {
-                constraints: constraints.unwrap_or_default(),
-            }),
-            (None, REAL) => ASN1Type::Real(Real {
-                constraints: constraints.unwrap_or_default(),
-            }),
-            (None, INTEGER) => ASN1Type::Integer(Integer {
-                constraints: constraints.unwrap_or_default(),
-                distinguished_values: None,
-            }),
-            (None, BIT_STRING) => ASN1Type::BitString(BitString {
-                constraints: constraints.unwrap_or_default(),
-                distinguished_values: None,
-            }),
-            (None, OCTET_STRING) => ASN1Type::OctetString(OctetString {
-                constraints: constraints.unwrap_or_default(),
-            }),
-            (None, GENERALIZED_TIME) => ASN1Type::GeneralizedTime(GeneralizedTime {
-                constraints: constraints.unwrap_or_default(),
-            }),
-            (None, UTC_TIME) => ASN1Type::UTCTime(UTCTime {
-                constraints: constraints.unwrap_or_default(),
-            }),
-            (None, OBJECT_IDENTIFIER) => ASN1Type::ObjectIdentifier(ObjectIdentifier {
-                constraints: constraints.unwrap_or_default(),
-            }),
-            (None, BMP_STRING) => ASN1Type::CharacterString(CharacterString {
-                constraints: constraints.unwrap_or_default(),
-                ty: CharacterStringType::BMPString,
-            }),
-            (None, UTF8_STRING) => ASN1Type::CharacterString(CharacterString {
-                constraints: constraints.unwrap_or_default(),
-                ty: CharacterStringType::UTF8String,
-            }),
-            (None, PRINTABLE_STRING) => ASN1Type::CharacterString(CharacterString {
-                constraints: constraints.unwrap_or_default(),
-                ty: CharacterStringType::PrintableString,
-            }),
-            (None, TELETEX_STRING) => ASN1Type::CharacterString(CharacterString {
-                constraints: constraints.unwrap_or_default(),
-                ty: CharacterStringType::TeletexString,
-            }),
-            (None, IA5_STRING) => ASN1Type::CharacterString(CharacterString {
-                constraints: constraints.unwrap_or_default(),
-                ty: CharacterStringType::IA5String,
-            }),
-            (None, UNIVERSAL_STRING) => ASN1Type::CharacterString(CharacterString {
-                constraints: constraints.unwrap_or_default(),
-                ty: CharacterStringType::UniversalString,
-            }),
-            (None, VISIBLE_STRING) => ASN1Type::CharacterString(CharacterString {
-                constraints: constraints.unwrap_or_default(),
-                ty: CharacterStringType::VisibleString,
-            }),
-            (None, GENERAL_STRING) => ASN1Type::CharacterString(CharacterString {
-                constraints: constraints.unwrap_or_default(),
-                ty: CharacterStringType::GeneralString,
-            }),
-            (None, VIDEOTEX_STRING) => ASN1Type::CharacterString(CharacterString {
-                constraints: constraints.unwrap_or_default(),
-                ty: CharacterStringType::VideotexString,
-            }),
-            (None, GRAPHIC_STRING) => ASN1Type::CharacterString(CharacterString {
-                constraints: constraints.unwrap_or_default(),
-                ty: CharacterStringType::GraphicString,
-            }),
-            (None, NUMERIC_STRING) => ASN1Type::CharacterString(CharacterString {
-                constraints: constraints.unwrap_or_default(),
-                ty: CharacterStringType::NumericString,
-            }),
-            _ => ASN1Type::ElsewhereDeclaredType((parent, identifier, constraints).into()),
-        }
-    }
-
     pub fn is_builtin_type(&self) -> bool {
         !matches!(
             self,
             ASN1Type::ElsewhereDeclaredType(_)
                 | ASN1Type::ChoiceSelectionType(_)
-                | ASN1Type::InformationObjectFieldReference(_)
+                | ASN1Type::ObjectClassField(_)
         )
     }
 
-    pub fn constraints(&self) -> Option<&Vec<Constraint>> {
+    pub fn constraints(&self) -> &[Constraint] {
         match self {
-            ASN1Type::Boolean(b) => Some(b.constraints()),
-            ASN1Type::Real(r) => Some(r.constraints()),
-            ASN1Type::Integer(i) => Some(i.constraints()),
-            ASN1Type::BitString(b) => Some(b.constraints()),
-            ASN1Type::OctetString(o) => Some(o.constraints()),
-            ASN1Type::CharacterString(c) => Some(c.constraints()),
-            ASN1Type::Enumerated(e) => Some(e.constraints()),
-            ASN1Type::Time(t) => Some(t.constraints()),
-            ASN1Type::Choice(c) => Some(c.constraints()),
-            ASN1Type::Set(s) | ASN1Type::Sequence(s) => Some(s.constraints()),
-            ASN1Type::SetOf(s) | ASN1Type::SequenceOf(s) => Some(s.constraints()),
-            ASN1Type::ElsewhereDeclaredType(e) => Some(e.constraints()),
-            ASN1Type::InformationObjectFieldReference(f) => Some(f.constraints()),
-            _ => None,
+            ASN1Type::Boolean(b) => b.constraints(),
+            ASN1Type::Real(r) => r.constraints(),
+            ASN1Type::Integer(i) => i.constraints(),
+            ASN1Type::BitString(b) => b.constraints(),
+            ASN1Type::OctetString(o) => o.constraints(),
+            ASN1Type::CharacterString(c) => c.constraints(),
+            ASN1Type::Enumerated(e) => e.constraints(),
+            ASN1Type::Time(t) => t.constraints(),
+            ASN1Type::Choice(c) => c.constraints(),
+            ASN1Type::Set(s) | ASN1Type::Sequence(s) => s.constraints(),
+            ASN1Type::SetOf(s) | ASN1Type::SequenceOf(s) => s.constraints(),
+            ASN1Type::ElsewhereDeclaredType(e) => e.constraints(),
+            ASN1Type::ObjectClassField(f) => f.constraints(),
+            ASN1Type::GeneralizedTime(g) => g.constraints(),
+            ASN1Type::UTCTime(u) => u.constraints(),
+            ASN1Type::ObjectIdentifier(o) => o.constraints(),
+            ASN1Type::ChoiceSelectionType(_)
+            | ASN1Type::Null
+            | ASN1Type::Any
+            | ASN1Type::EmbeddedPdv
+            | ASN1Type::External => &[],
         }
     }
 
@@ -985,20 +959,18 @@ impl ASN1Type {
             ASN1Type::Set(s) | ASN1Type::Sequence(s) => Some(s.constraints_mut()),
             ASN1Type::SetOf(s) | ASN1Type::SequenceOf(s) => Some(s.constraints_mut()),
             ASN1Type::ElsewhereDeclaredType(e) => Some(e.constraints_mut()),
-            ASN1Type::InformationObjectFieldReference(f) => Some(f.constraints_mut()),
-            _ => None,
+            ASN1Type::ObjectClassField(f) => Some(f.constraints_mut()),
+            ASN1Type::GeneralizedTime(g) => Some(g.constraints_mut()),
+            ASN1Type::UTCTime(u) => Some(u.constraints_mut()),
+            ASN1Type::ObjectIdentifier(o) => Some(o.constraints_mut()),
+            ASN1Type::ChoiceSelectionType(_)
+            | ASN1Type::Null
+            | ASN1Type::Any
+            | ASN1Type::EmbeddedPdv
+            | ASN1Type::External => None,
         }
     }
 }
-
-pub const NUMERIC_STRING_CHARSET: [char; 11] =
-    [' ', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
-pub const PRINTABLE_STRING_CHARSET: [char; 74] = [
-    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
-    'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l',
-    'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4',
-    '5', '6', '7', '8', '9', ' ', '\'', '(', ')', '+', ',', '-', '.', '/', ':', '=', '?',
-];
 
 /// The types of an ASN1 character strings.
 #[cfg_attr(test, derive(EnumDebug))]
@@ -1019,40 +991,52 @@ pub enum CharacterStringType {
 }
 
 impl CharacterStringType {
-    pub fn character_set(&self) -> BTreeMap<usize, char> {
-        match self {
-            CharacterStringType::NumericString => {
-                NUMERIC_STRING_CHARSET.into_iter().enumerate().collect()
-            }
-            CharacterStringType::VisibleString | CharacterStringType::PrintableString => {
-                PRINTABLE_STRING_CHARSET.into_iter().enumerate().collect()
-            }
-            CharacterStringType::IA5String => (0..128u32)
-                .map(|i| char::from_u32(i).unwrap())
+    pub fn character_set(&self) -> &'static BTreeMap<usize, char> {
+        static NUMERIC_CHARSET: LazyLock<BTreeMap<usize, char>> = LazyLock::new(|| {
+            [' ', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+                .into_iter()
                 .enumerate()
-                .collect(),
-            _ => (0..u16::MAX as u32)
+                .collect()
+        });
+        static PRINTABLE_CHARSET: LazyLock<BTreeMap<usize, char>> = LazyLock::new(|| {
+            [
+                'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
+                'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f',
+                'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
+                'w', 'x', 'y', 'z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ' ', '\'',
+                '(', ')', '+', ',', '-', '.', '/', ':', '=', '?',
+            ]
+            .into_iter()
+            .enumerate()
+            .collect()
+        });
+        // X.680 defines VisibleString using the ISO/IEC 646 encoding (cells 2/0–7/14),
+        // i.e. the 95 visible characters with indices computed as (ISO 646 ENCODING) - 32.
+        static VISIBLE_CHARSET: LazyLock<BTreeMap<usize, char>> = LazyLock::new(|| {
+            (0x20u32..=0x7Eu32)
                 .filter_map(char::from_u32)
                 .enumerate()
-                .collect(),
-        }
-    }
-}
+                .collect()
+        });
+        static IA5_CHARSET: LazyLock<BTreeMap<usize, char>> = LazyLock::new(|| {
+            (0..128u32)
+                .filter_map(char::from_u32)
+                .enumerate()
+                .collect()
+        });
+        static ANY_CHARSET: LazyLock<BTreeMap<usize, char>> = LazyLock::new(|| {
+            (0..u16::MAX as u32)
+                .filter_map(char::from_u32)
+                .enumerate()
+                .collect()
+        });
 
-impl From<&str> for CharacterStringType {
-    fn from(value: &str) -> Self {
-        match value {
-            IA5_STRING => Self::IA5String,
-            NUMERIC_STRING => Self::NumericString,
-            VISIBLE_STRING => Self::VisibleString,
-            TELETEX_STRING => Self::TeletexString,
-            VIDEOTEX_STRING => Self::VideotexString,
-            GRAPHIC_STRING => Self::GraphicString,
-            GENERAL_STRING => Self::GeneralString,
-            UNIVERSAL_STRING => Self::UniversalString,
-            BMP_STRING => Self::BMPString,
-            PRINTABLE_STRING => Self::PrintableString,
-            _ => Self::UTF8String,
+        match self {
+            CharacterStringType::NumericString => &NUMERIC_CHARSET,
+            CharacterStringType::VisibleString => &VISIBLE_CHARSET,
+            CharacterStringType::PrintableString => &PRINTABLE_CHARSET,
+            CharacterStringType::IA5String => &IA5_CHARSET,
+            _ => &ANY_CHARSET,
         }
     }
 }
@@ -1069,22 +1053,6 @@ pub enum IntegerType {
     Int64,
     Uint64,
     Unbounded,
-}
-
-impl ToTokens for IntegerType {
-    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        match self {
-            IntegerType::Int8 => tokens.append_all(quote!(i8)),
-            IntegerType::Uint8 => tokens.append_all(quote!(u8)),
-            IntegerType::Int16 => tokens.append_all(quote!(i16)),
-            IntegerType::Uint16 => tokens.append_all(quote!(u16)),
-            IntegerType::Int32 => tokens.append_all(quote!(i32)),
-            IntegerType::Uint32 => tokens.append_all(quote!(u32)),
-            IntegerType::Int64 => tokens.append_all(quote!(i64)),
-            IntegerType::Uint64 => tokens.append_all(quote!(u64)),
-            IntegerType::Unbounded => tokens.append_all(quote!(Integer)),
-        }
-    }
 }
 
 impl IntegerType {
@@ -1139,6 +1107,7 @@ pub enum ASN1Value {
     },
     Time(String),
     ElsewhereDeclaredValue {
+        module: Option<String>,
         parent: Option<String>,
         identifier: String,
     },
@@ -1303,18 +1272,10 @@ impl ASN1Value {
 pub struct DeclarationElsewhere {
     /// Chain of parent declaration leading back to a basic ASN1 type
     pub parent: Option<String>,
+    /// Name of the module where the identifier should be found.
+    pub module: Option<String>,
     pub identifier: String,
     pub constraints: Vec<Constraint>,
-}
-
-impl From<(Option<&str>, &str, Option<Vec<Constraint>>)> for DeclarationElsewhere {
-    fn from(value: (Option<&str>, &str, Option<Vec<Constraint>>)) -> Self {
-        DeclarationElsewhere {
-            parent: value.0.map(ToString::to_string),
-            identifier: value.1.into(),
-            constraints: value.2.unwrap_or_default(),
-        }
-    }
 }
 
 /// Tag classes

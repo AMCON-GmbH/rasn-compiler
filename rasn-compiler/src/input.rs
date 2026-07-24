@@ -6,27 +6,25 @@
 
 use std::{
     fmt::Debug,
-    ops::RangeTo,
+    path::Path,
+    slice::SliceIndex,
     str::{CharIndices, Chars, FromStr},
 };
 
-use nom::{
-    AsBytes, Compare, ExtendInto, FindSubstring, FindToken, InputIter, InputLength, InputTake,
-    InputTakeAtPosition, Offset, ParseTo, Slice,
-};
+use nom::{AsBytes, Compare, ExtendInto, FindSubstring, FindToken, Offset, ParseTo, Parser};
 
-use crate::lexer::error::ParserResult;
+use crate::AsnSourceUnit;
 
 /// Informs `Input` of a context switch.
-pub fn context_boundary<'a, F, O: Debug>(
+pub fn context_boundary<'a, F>(
     mut inner: F,
-) -> impl FnMut(Input<'a>) -> ParserResult<'a, O>
+) -> impl Parser<Input<'a>, Output = F::Output, Error = F::Error>
 where
-    F: FnMut(Input<'a>) -> ParserResult<'a, O>,
+    F: Parser<Input<'a>>,
 {
-    move |mut input| {
+    move |mut input: Input<'a>| {
         input.reset_context();
-        inner(input)
+        inner.parse(input)
     }
 }
 
@@ -34,8 +32,9 @@ where
 /// for parsing ASN.1 sources with [nom](https://github.com/rust-bakery/nom).
 /// The `Input` type is a thin wrapper around a string slice, with additional
 /// data for debugging purposes.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Input<'a> {
+    src_file: Option<&'a Path>,
     inner: &'a str,
     /// current line position of parser, starts at 1
     line: usize,
@@ -55,9 +54,28 @@ pub struct Input<'a> {
     offset: usize,
 }
 
+// Specialize `fmt::Debug` so that `Input::inner` can be shortened.
+impl Debug for Input<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Input")
+            .field("src_file", &self.src_file)
+            .field("inner", &ShortenedDebugStr(self.inner()))
+            .field("line", &self.line)
+            .field("column", &self.column)
+            .field("offset", &self.offset)
+            .field("context_start_line", &self.context_start_line)
+            .field("context_start_offset", &self.context_start_offset)
+            .finish()
+    }
+}
+
 impl<'a> Input<'a> {
     pub fn into_inner(self) -> &'a str {
         self.inner
+    }
+
+    pub fn src_file(&self) -> Option<String> {
+        self.src_file.map(|p| p.to_string_lossy().to_string())
     }
 }
 
@@ -102,6 +120,7 @@ impl Input<'_> {
     #[cfg(test)]
     pub fn with_line_column_and_offset(&self, line: usize, column: usize, offset: usize) -> Self {
         Self {
+            src_file: self.src_file,
             inner: self.inner,
             line,
             context_start_line: self.context_start_line,
@@ -112,9 +131,24 @@ impl Input<'_> {
     }
 }
 
+impl<'a> From<&'a AsnSourceUnit<'a>> for Input<'a> {
+    fn from(value: &'a AsnSourceUnit) -> Self {
+        Input {
+            src_file: value.path,
+            inner: &value.source,
+            line: 1,
+            context_start_line: 1,
+            context_start_offset: 0,
+            column: 1,
+            offset: 0,
+        }
+    }
+}
+
 impl<'a> From<&'a str> for Input<'a> {
     fn from(value: &'a str) -> Self {
         Self {
+            src_file: None,
             inner: value,
             line: 1,
             context_start_line: 1,
@@ -189,60 +223,13 @@ impl FindToken<char> for Input<'_> {
     }
 }
 
-impl<'a> InputIter for Input<'a> {
-    type Item = char;
-    type Iter = CharIndices<'a>;
-    type IterElem = Chars<'a>;
-
-    #[inline]
-    fn iter_indices(&self) -> Self::Iter {
-        self.inner.iter_indices()
-    }
-
-    #[inline]
-    fn iter_elements(&self) -> Self::IterElem {
-        self.inner.iter_elements()
-    }
-
-    #[inline]
-    fn position<P>(&self, predicate: P) -> Option<usize>
-    where
-        P: Fn(Self::Item) -> bool,
-    {
-        self.inner.position(predicate)
-    }
-
-    #[inline]
-    fn slice_index(&self, count: usize) -> Result<usize, nom::Needed> {
-        self.inner.slice_index(count)
-    }
-}
-
-impl InputLength for Input<'_> {
-    fn input_len(&self) -> usize {
-        self.inner.len()
-    }
-}
-
-impl InputTake for Input<'_> {
-    fn take(&self, count: usize) -> Self {
-        self.slice(..count)
-    }
-
-    fn take_split(&self, count: usize) -> (Self, Self) {
-        (self.slice(count..), self.slice(..count))
-    }
-}
-
-impl<'a, R> Slice<R> for Input<'a>
-where
-    &'a str: Slice<R> + Slice<RangeTo<usize>>,
-{
-    fn slice(&self, range: R) -> Self {
-        let inner = self.inner.slice(range);
+impl<'a> Input<'a> {
+    pub fn slice(&self, range: impl SliceIndex<str, Output = str>) -> Self {
+        let inner = &self.inner[range];
         let consumed_len = self.inner.offset(inner);
         if consumed_len == 0 {
             Input {
+                src_file: self.src_file,
                 line: self.line,
                 column: self.column,
                 offset: self.offset,
@@ -251,9 +238,9 @@ where
                 inner,
             }
         } else {
-            let consumed = self.inner.slice(..consumed_len);
+            let consumed = &self.inner[..consumed_len];
             let line_breaks = consumed.match_indices('\n');
-            let last_line_break = line_breaks.clone().last();
+            let last_line_break = line_breaks.clone().next_back();
             let column = if let Some(last) = last_line_break {
                 consumed_len - last.0 + 1 // because we're 1-indexing
             } else {
@@ -262,6 +249,7 @@ where
             let line = self.line + line_breaks.count();
 
             Input {
+                src_file: self.src_file,
                 line,
                 column,
                 context_start_line: self.context_start_line,
@@ -273,8 +261,10 @@ where
     }
 }
 
-impl InputTakeAtPosition for Input<'_> {
+impl<'a> nom::Input for Input<'a> {
     type Item = char;
+    type Iter = Chars<'a>;
+    type IterIndices = CharIndices<'a>;
 
     fn split_at_position<P, E: nom::error::ParseError<Self>>(
         &self,
@@ -317,6 +307,41 @@ impl InputTakeAtPosition for Input<'_> {
         }
     }
 
+    fn input_len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn take(&self, count: usize) -> Self {
+        self.slice(..count)
+    }
+
+    fn take_from(&self, index: usize) -> Self {
+        self.slice(index..)
+    }
+
+    fn take_split(&self, count: usize) -> (Self, Self) {
+        (self.slice(count..), self.slice(..count))
+    }
+
+    fn position<P>(&self, predicate: P) -> Option<usize>
+    where
+        P: Fn(Self::Item) -> bool,
+    {
+        self.inner.position(predicate)
+    }
+
+    fn iter_elements(&self) -> Self::Iter {
+        self.inner.iter_elements()
+    }
+
+    fn iter_indices(&self) -> Self::IterIndices {
+        self.inner.iter_indices()
+    }
+
+    fn slice_index(&self, count: usize) -> Result<usize, nom::Needed> {
+        self.inner.slice_index(count)
+    }
+
     fn split_at_position1_complete<P, E: nom::error::ParseError<Self>>(
         &self,
         predicate: P,
@@ -348,6 +373,30 @@ impl Offset for Input<'_> {
 impl<R: FromStr> ParseTo<R> for Input<'_> {
     fn parse_to(&self) -> Option<R> {
         self.inner.parse_to()
+    }
+}
+
+/// A wrapper that shortens the contained string when used in fmt::Debug.
+struct ShortenedDebugStr<'i>(&'i str);
+
+/// Default max chars to include in fmt::Debug.
+const SHORTEN_DEBUG_STR_LEN: usize = 200;
+
+impl Debug for ShortenedDebugStr<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut chars_iter = self.0.char_indices();
+        let last_char_index = chars_iter
+            .by_ref()
+            .take(SHORTEN_DEBUG_STR_LEN)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        write!(f, "{:?}", &self.0[..last_char_index])?;
+        let chars_left = chars_iter.count();
+        if chars_left > 0 {
+            write!(f, " + {chars_left}")?;
+        }
+        Ok(())
     }
 }
 

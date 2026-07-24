@@ -4,6 +4,7 @@ use nom::{
     combinator::{map, map_res, opt, recognize},
     multi::many1,
     sequence::{delimited, preceded},
+    Parser,
 };
 
 use crate::{
@@ -16,7 +17,7 @@ use crate::{
 
 use super::{
     common::skip_ws_and_comments,
-    constraint::constraint,
+    constraint::constraints,
     error::{MiscError, ParserResult},
     into_inner,
 };
@@ -24,36 +25,40 @@ use super::{
 pub fn time_value(input: Input<'_>) -> ParserResult<'_, ASN1Value> {
     map(skip_ws_and_comments(t_string), |t_string| {
         ASN1Value::Time(t_string.to_owned())
-    })(input)
+    })
+    .parse(input)
 }
 
 pub fn time(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
     map(
-        skip_ws_and_comments(preceded(tag(TIME), opt(constraint))),
+        skip_ws_and_comments(preceded(tag(TIME), opt(constraints))),
         |t| ASN1Type::Time(t.into()),
-    )(input)
+    )
+    .parse(input)
 }
 
 pub fn generalized_time(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
     map(
-        skip_ws_and_comments(preceded(tag(GENERALIZED_TIME), opt(constraint))),
+        skip_ws_and_comments(preceded(tag(GENERALIZED_TIME), opt(constraints))),
         |cnst| {
             ASN1Type::GeneralizedTime(GeneralizedTime {
                 constraints: cnst.unwrap_or_default(),
             })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 pub fn utc_time(input: Input<'_>) -> ParserResult<'_, ASN1Type> {
     map(
-        skip_ws_and_comments(preceded(tag(UTC_TIME), opt(constraint))),
+        skip_ws_and_comments(preceded(tag(UTC_TIME), opt(constraints))),
         |cnst| {
             ASN1Type::UTCTime(UTCTime {
                 constraints: cnst.unwrap_or_default(),
             })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 const NON_NUMERIC_TIME_CHARS: [char; 17] = [
@@ -81,5 +86,6 @@ fn t_string(input: Input<'_>) -> ParserResult<'_, &str> {
             },
         ),
         char('"'),
-    )(input.clone())
+    )
+    .parse(input)
 }

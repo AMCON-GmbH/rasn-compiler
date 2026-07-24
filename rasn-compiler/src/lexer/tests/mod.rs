@@ -32,8 +32,8 @@ fn parses_toplevel_simple_integer_declaration() {
         assert!(!int.constraints.is_empty());
         assert_eq!(
             *int.constraints.first().unwrap(),
-            Constraint::SubtypeConstraint(ElementSet {
-                set: ElementOrSetOperation::Element(SubtypeElement::ValueRange {
+            Constraint::Subtype(ElementSetSpecs {
+                set: ElementOrSetOperation::Element(SubtypeElements::ValueRange {
                     min: Some(ASN1Value::Integer(1)),
                     max: Some(ASN1Value::Integer(8)),
                     extensible: false
@@ -70,8 +70,8 @@ fn parses_toplevel_macro_integer_declaration() {
     if let ASN1Type::Integer(int) = tld.ty {
         assert_eq!(
             *int.constraints.first().unwrap(),
-            Constraint::SubtypeConstraint(ElementSet {
-                set: ElementOrSetOperation::Element(SubtypeElement::ValueRange {
+            Constraint::Subtype(ElementSetSpecs {
+                set: ElementOrSetOperation::Element(SubtypeElements::ValueRange {
                     min: Some(ASN1Value::Integer(0)),
                     max: Some(ASN1Value::Integer(161)),
                     extensible: true
@@ -172,34 +172,35 @@ fn parses_toplevel_crossrefering_declaration() {
             name: "EventZone".into(),
             ty: ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                 parent: None,
+                module: None,
                 identifier: "EventHistory".into(),
-                constraints: vec![Constraint::SubtypeConstraint(ElementSet {
+                constraints: vec![Constraint::Subtype(ElementSetSpecs {
                     set: ElementOrSetOperation::SetOperation(SetOperation {
-                        base: SubtypeElement::SingleTypeConstraint(vec![
-                            Constraint::SubtypeConstraint(ElementSet {
+                        base: SubtypeElements::SingleTypeConstraint(vec![Constraint::Subtype(
+                            ElementSetSpecs {
                                 extensible: false,
                                 set: ElementOrSetOperation::Element(
-                                    SubtypeElement::MultipleTypeConstraints(InnerTypeConstraint {
+                                    SubtypeElements::MultipleTypeConstraints(InnerTypeConstraint {
                                         is_partial: true,
-                                        constraints: vec![ConstrainedComponent {
+                                        constraints: vec![NamedConstraint {
                                             identifier: "eventDeltaTime".into(),
                                             constraints: vec![],
                                             presence: ComponentPresence::Present
                                         }]
                                     })
                                 )
-                            })
-                        ]),
+                            }
+                        )]),
                         operator: SetOperator::Union,
                         operant: Box::new(ElementOrSetOperation::Element(
-                            SubtypeElement::SingleTypeConstraint(vec![
-                                Constraint::SubtypeConstraint(ElementSet {
+                            SubtypeElements::SingleTypeConstraint(vec![Constraint::Subtype(
+                                ElementSetSpecs {
                                     extensible: false,
                                     set: ElementOrSetOperation::Element(
-                                        SubtypeElement::MultipleTypeConstraints(
+                                        SubtypeElements::MultipleTypeConstraints(
                                             InnerTypeConstraint {
                                                 is_partial: true,
-                                                constraints: vec![ConstrainedComponent {
+                                                constraints: vec![NamedConstraint {
                                                     identifier: "eventDeltaTime".into(),
                                                     constraints: vec![],
                                                     presence: ComponentPresence::Absent
@@ -207,15 +208,15 @@ fn parses_toplevel_crossrefering_declaration() {
                                             }
                                         )
                                     )
-                                })
-                            ])
+                                }
+                            )])
                         ))
                     }),
                     extensible: false
                 })]
             }),
             tag: None,
-            index: None
+            module_header: None
         }
     );
 }
@@ -238,9 +239,9 @@ fn parses_anonymous_sequence_of_declaration() {
             ty: ASN1Type::SequenceOf(SequenceOrSetOf {
                 element_tag: None,
                 is_recursive: false,
-                constraints: vec![Constraint::SubtypeConstraint(ElementSet {
-                    set: ElementOrSetOperation::Element(SubtypeElement::SizeConstraint(Box::new(
-                        ElementOrSetOperation::Element(SubtypeElement::ValueRange {
+                constraints: vec![Constraint::Subtype(ElementSetSpecs {
+                    set: ElementOrSetOperation::Element(SubtypeElements::SizeConstraint(Box::new(
+                        ElementOrSetOperation::Element(SubtypeElements::ValueRange {
                             min: Some(ASN1Value::Integer(1)),
                             max: Some(ASN1Value::Integer(16)),
                             extensible: false
@@ -250,12 +251,13 @@ fn parses_anonymous_sequence_of_declaration() {
                 })],
                 element_type: Box::new(ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                     parent: None,
+                    module: None,
                     identifier: "InterferenceManagementZone".into(),
                     constraints: vec![]
                 }))
             }),
             tag: None,
-            index: None
+            module_header: None
         }
     );
 }
@@ -277,28 +279,28 @@ fn parses_object_set_value() {
         ToplevelInformationDefinition {
             comments: "comments".into(),
             name: "CpmContainers".into(),
-            index: None,
+            module_header: None,
             parameterization: None,
-            class: Some(ClassLink::ByName("CPM-CONTAINER-ID-AND-TYPE".into())),
+            class: ClassLink::ByName("CPM-CONTAINER-ID-AND-TYPE".into()),
             value: ASN1Information::ObjectSet(ObjectSet {
                 values: vec![
                     ObjectSetValue::Inline(InformationObjectFields::CustomSyntax(vec![
                         SyntaxApplication::LiteralOrTypeReference(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "OriginatingVehicleContainer".into(),
                             constraints: vec![]
                         }),
                         SyntaxApplication::LiteralOrTypeReference(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "IDENTIFIED".into(),
                             constraints: vec![]
                         }),
-                        SyntaxApplication::LiteralOrTypeReference(DeclarationElsewhere {
-                            parent: None,
-                            identifier: "BY".into(),
-                            constraints: vec![]
-                        }),
+                        // SyntaxApplication::Comma,
+                        SyntaxApplication::Literal("BY".into()),
                         SyntaxApplication::ValueReference(ASN1Value::ElsewhereDeclaredValue {
+                            module: None,
                             identifier: "originatingVehicleContainer".into(),
                             parent: None
                         })
@@ -306,20 +308,19 @@ fn parses_object_set_value() {
                     ObjectSetValue::Inline(InformationObjectFields::CustomSyntax(vec![
                         SyntaxApplication::LiteralOrTypeReference(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "PerceivedObjectContainer".into(),
                             constraints: vec![]
                         }),
                         SyntaxApplication::LiteralOrTypeReference(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "IDENTIFIED".into(),
                             constraints: vec![]
                         }),
-                        SyntaxApplication::LiteralOrTypeReference(DeclarationElsewhere {
-                            parent: None,
-                            identifier: "BY".into(),
-                            constraints: vec![]
-                        }),
+                        SyntaxApplication::Literal("BY".into()),
                         SyntaxApplication::ValueReference(ASN1Value::ElsewhereDeclaredValue {
+                            module: None,
                             identifier: "perceivedObjectContainer".into(),
                             parent: None
                         })
@@ -341,10 +342,10 @@ fn parses_empty_extensible_object_set() {
         .1,
         ToplevelInformationDefinition {
             comments: "".into(),
-            index: None,
+            module_header: None,
             parameterization: None,
             name: "Reg-AdvisorySpeed".into(),
-            class: Some(ClassLink::ByName("REG-EXT-ID-AND-TYPE".into())),
+            class: ClassLink::ByName("REG-EXT-ID-AND-TYPE".into()),
             value: ASN1Information::ObjectSet(ObjectSet {
                 values: vec![],
                 extensible: Some(0)
@@ -356,7 +357,7 @@ fn parses_empty_extensible_object_set() {
 #[test]
 fn parses_class_declaration() {
     assert_eq!(
-        top_level_information_declaration(
+        object_class_assignement(
             r#"REG-EXT-ID-AND-TYPE ::= CLASS {
                   &id     RegionId UNIQUE,
                   &Type
@@ -365,30 +366,28 @@ fn parses_class_declaration() {
         )
         .unwrap()
         .1,
-        ToplevelInformationDefinition {
+        ObjectClassAssignment {
             comments: "".into(),
             name: "REG-EXT-ID-AND-TYPE".into(),
-            class: None,
-            index: None,
-            parameterization: None,
-            value: ASN1Information::ObjectClass(InformationObjectClass {
+            module_header: None,
+            parameterization: Parameterization::default(),
+            definition: ObjectClassDefn {
                 fields: vec![
                     InformationObjectClassField {
                         identifier: ObjectFieldIdentifier::SingleValue("&id".into()),
                         ty: Some(ASN1Type::ElsewhereDeclaredType(DeclarationElsewhere {
                             parent: None,
+                            module: None,
                             identifier: "RegionId".into(),
                             constraints: vec![]
                         })),
-                        is_optional: false,
-                        default: None,
+                        optionality: Optionality::Required,
                         is_unique: true
                     },
                     InformationObjectClassField {
                         identifier: ObjectFieldIdentifier::MultipleValue("&Type".into()),
                         ty: None,
-                        is_optional: false,
-                        default: None,
+                        optionality: Optionality::Required,
                         is_unique: false
                     }
                 ],
@@ -404,7 +403,7 @@ fn parses_class_declaration() {
                         ))
                     ]
                 })
-            })
+            }
         }
     )
 }
@@ -423,7 +422,7 @@ fn parses_parameterized_declaration() {
         .1,
         ToplevelTypeDefinition {
             comments: "".into(),
-            index: None,
+            module_header: None,
             name: "RegionalExtension".into(),
             ty: ASN1Type::Sequence(SequenceOrSet {
                 extensible: None,
@@ -434,47 +433,39 @@ fn parses_parameterized_declaration() {
                         is_recursive: false,
                         name: "regionId".into(),
                         tag: None,
-                        ty: ASN1Type::InformationObjectFieldReference(
-                            InformationObjectFieldReference {
-                                class: "REG-EXT-ID-AND-TYPE".into(),
-                                field_path: vec![ObjectFieldIdentifier::SingleValue("&id".into())],
-                                constraints: vec![Constraint::TableConstraint(TableConstraint {
-                                    object_set: ObjectSet {
-                                        values: vec![ObjectSetValue::Reference("Set".into())],
-                                        extensible: None
-                                    },
-                                    linked_fields: vec![]
-                                })]
-                            }
-                        ),
-                        default_value: None,
-                        is_optional: false,
+                        ty: ASN1Type::ObjectClassField(ObjectClassFieldType {
+                            class: "REG-EXT-ID-AND-TYPE".into(),
+                            field_path: vec![ObjectFieldIdentifier::SingleValue("&id".into())],
+                            constraints: vec![Constraint::Table(TableConstraint {
+                                object_set: ObjectSet {
+                                    values: vec![ObjectSetValue::Reference("Set".into())],
+                                    extensible: None
+                                },
+                                linked_fields: vec![]
+                            })]
+                        }),
+                        optionality: Optionality::Required,
                         constraints: vec![]
                     },
                     SequenceOrSetMember {
                         is_recursive: false,
                         name: "regExtValue".into(),
                         tag: None,
-                        ty: ASN1Type::InformationObjectFieldReference(
-                            InformationObjectFieldReference {
-                                class: "REG-EXT-ID-AND-TYPE".into(),
-                                field_path: vec![ObjectFieldIdentifier::MultipleValue(
-                                    "&Type".into()
-                                )],
-                                constraints: vec![Constraint::TableConstraint(TableConstraint {
-                                    object_set: ObjectSet {
-                                        values: vec![ObjectSetValue::Reference("Set".into())],
-                                        extensible: None
-                                    },
-                                    linked_fields: vec![RelationalConstraint {
-                                        field_name: "regionId".into(),
-                                        level: 0
-                                    }]
-                                })]
-                            }
-                        ),
-                        default_value: None,
-                        is_optional: false,
+                        ty: ASN1Type::ObjectClassField(ObjectClassFieldType {
+                            class: "REG-EXT-ID-AND-TYPE".into(),
+                            field_path: vec![ObjectFieldIdentifier::MultipleValue("&Type".into())],
+                            constraints: vec![Constraint::Table(TableConstraint {
+                                object_set: ObjectSet {
+                                    values: vec![ObjectSetValue::Reference("Set".into())],
+                                    extensible: None
+                                },
+                                linked_fields: vec![RelationalConstraint {
+                                    field_name: "regionId".into(),
+                                    level: 0
+                                }]
+                            })]
+                        }),
+                        optionality: Optionality::Required,
                         constraints: vec![]
                     }
                 ]
@@ -505,7 +496,7 @@ fn parses_choice() {
         .1,
         ToplevelTypeDefinition {
             comments: "".into(),
-            index: None,
+            module_header: None,
             name: "Choice-example".into(),
             ty: ASN1Type::Choice(Choice {
                 extensible: Some(2),
@@ -561,7 +552,7 @@ fn parses_sequence_of_value() {
                 (None, Box::new(ASN1Value::Integer(2))),
                 (None, Box::new(ASN1Value::Integer(3)))
             ]),
-            index: None
+            module_header: None
         },
         top_level_value_declaration(r#"test-Sequence SEQUENCE OF INTEGER ::= { 1, 2, 3 }"#.into())
             .unwrap()
